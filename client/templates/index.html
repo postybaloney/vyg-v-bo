@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Voyage is king</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='monitor.css') }}" />
+  </head>
+  <body{% if not audio_enabled %} class="audio-off"{% endif %}>
+    <header class="top-bar">
+      <div id="status-text" class="status-text">Connecting…</div>
+      <div id="rail-text" class="rail-text rail-waiting">Rail warning: waiting for data</div>
+      <div id="trial-text" class="trial-text">Collection: start recording</div>
+    </header>
+
+    <section class="controls-row">
+      <span class="page-label">16-channel monitor</span>
+      <button type="button" id="btn-subject" class="subject-chip">Choose subject</button>
+      <button type="button" id="btn-scale">Scale: Auto</button>
+      <label class="amplitude-slider">
+        <span>Amplitude</span>
+        <input type="range" id="amplitude-slider" min="50" max="2000" step="10" value="150" disabled />
+        <output id="amplitude-val" for="amplitude-slider">per graph</output>
+      </label>
+      <button type="button" id="btn-record" class="primary" disabled>Start Session Recording</button>
+      <button type="button" id="btn-alignment-test">Alignment Test</button>
+      <button type="button" id="btn-model-test">Test Model</button>
+      <button type="button" id="btn-model-use">Use Model</button>
+      <button type="button" id="btn-speaker-test"{% if not audio_enabled %} disabled{% endif %}>Play sentence</button>
+    </section>
+
+    <section id="collect-panel" class="collect-panel hidden">
+      <div class="collect-word-head">
+        <p class="collect-hint" id="collect-hint">Choose a word to collect</p>
+        <label class="scramble-slider collect-rep-slider">
+          <span>rep</span>
+          <div class="slider-controls">
+            <input type="range" id="single-rep" min="1" max="20" value="7" />
+            <output id="single-rep-val" for="single-rep">7</output>
+          </div>
+        </label>
+      </div>
+      <div id="word-buttons" class="word-buttons"></div>
+
+      <div class="collect-section collect-word-weights-section">
+        <h4 class="collect-subhead">Word distribution</h4>
+        <p class="collect-subhint">Relative pick rate for scrambles and occasional-word collection words — at least two words must stay above 0</p>
+        <p id="word-weight-warning" class="collect-weight-status ok" aria-live="polite">Distribution OK — at least two words active</p>
+        <div id="word-weight-sliders" class="distribution-sliders"></div>
+        <label class="distribution-slider negative-word-rate-slider">
+          <span>Off-list word rate</span>
+          <div class="slider-controls">
+            <input type="range" id="negative-word-rate" min="0" max="1" step="0.05" value="0" />
+            <output id="negative-word-rate-val" for="negative-word-rate">0.00</output>
+          </div>
+        </label>
+        <p class="collect-subhint">Chance an off-list word appears instead of a collection word (scramble + occasional word modes)</p>
+      </div>
+
+      <div class="collect-modes-row">
+        <div class="collect-mode-column scramble-column">
+          <h4 class="collect-subhead">Scramble</h4>
+          <div class="scramble-controls">
+            <button type="button" id="btn-scramble-fast" class="scramble-btn">Scramble Fast</button>
+            <button type="button" id="btn-scramble-breaks" class="scramble-btn">Scramble Breaks</button>
+            <button type="button" id="btn-scramble-stop" class="scramble-stop-btn hidden">Stop Next Chance</button>
+            <label class="scramble-slider">
+              <span>set</span>
+              <div class="slider-controls">
+                <input type="range" id="scramble-set" min="1" max="20" value="5" />
+                <output id="scramble-set-val" for="scramble-set">5</output>
+              </div>
+            </label>
+            <label class="scramble-slider">
+              <span>rep</span>
+              <div class="slider-controls">
+                <input type="range" id="scramble-rep" min="1" max="20" value="5" />
+                <output id="scramble-rep-val" for="scramble-rep">5</output>
+              </div>
+            </label>
+          </div>
+        </div>
+
+        <div class="collect-mode-column occasional-word-column">
+          <h4 class="collect-subhead">Occasional word</h4>
+          <button type="button" id="btn-occasional-word" class="occasional-word-btn">Occasional Word</button>
+          <p class="collect-subhint">Segment mix while occasional-word mode is running</p>
+          <div id="occasional-word-mix-sliders" class="distribution-sliders"></div>
+        </div>
+      </div>
+    </section>
+
+    <div id="collect-prompt" class="collect-prompt hidden" aria-live="polite">
+      <div id="collect-prompt-word" class="collect-prompt-word"></div>
+      <div id="collect-prompt-main" class="collect-prompt-main"></div>
+      <div id="collect-prompt-sub" class="collect-prompt-sub"></div>
+    </div>
+
+    <div id="alignment-prompt" class="collect-prompt alignment-prompt hidden" aria-live="polite">
+      <div id="alignment-prompt-word" class="collect-prompt-word">Alignment test</div>
+      <div id="alignment-prompt-main" class="collect-prompt-main"></div>
+      <div id="alignment-prompt-sub" class="collect-prompt-sub"></div>
+    </div>
+
+    <div id="model-test-prompt" class="collect-prompt model-test-prompt hidden" aria-live="polite">
+      <div id="model-test-prompt-word" class="collect-prompt-word">Model test</div>
+      <div id="model-test-prompt-main" class="collect-prompt-main"></div>
+      <div id="model-test-prompt-sub" class="collect-prompt-sub"></div>
+    </div>
+
+    <section id="alignment-result" class="alignment-result hidden" aria-live="polite">
+      <div class="alignment-result-head">
+        <h2>Labeled blink window</h2>
+        <p id="alignment-result-meta" class="alignment-result-meta"></p>
+        <button type="button" id="btn-alignment-dismiss">Dismiss</button>
+      </div>
+      <p class="alignment-result-hint">Shaded region = backend label (same timing as collection “say” window). Blink artifacts should appear inside it.</p>
+      <div id="alignment-result-plots" class="alignment-result-plots"></div>
+    </section>
+
+    <section id="model-test-result" class="model-test-result hidden" aria-live="polite">
+      <div class="model-test-result-head">
+        <h2>Model predictions</h2>
+        <p id="model-test-result-meta" class="model-test-result-meta"></p>
+        <button type="button" id="btn-model-test-dismiss">Dismiss</button>
+      </div>
+      <div id="model-test-result-rows" class="model-test-result-rows"></div>
+    </section>
+
+    <section id="model-use-panel" class="model-use-panel hidden" aria-live="polite">
+      <div class="model-use-head">
+        <h2>Live model</h2>
+        <p id="model-use-meta" class="model-use-meta"></p>
+      </div>
+      <div id="model-use-prediction" class="model-use-prediction"></div>
+      <div id="model-use-bars" class="model-test-bars"></div>
+    </section>
+
+    <div id="word-switch-flash" class="word-switch-flash" aria-hidden="true"></div>
+
+    <main id="plot-area" class="plot-area">
+      <div class="plot-columns">
+        <section class="plot-column" id="col-eeg">
+          <div class="column-head">
+            <h3>EEG</h3>
+            <div id="legend-eeg" class="band-legend"></div>
+          </div>
+          <div class="column-subheads">
+            <span class="subhead-raw">Raw µV</span>
+            <span class="subhead-filtered">Filtered µV</span>
+            <span class="subhead-bands">Band power</span>
+          </div>
+          <div class="plot-stack" id="stack-eeg"></div>
+          <div class="column-x-label">Time (s)</div>
+        </section>
+        <section class="plot-column" id="col-emg">
+          <div class="column-head">
+            <h3>EMG</h3>
+            <div id="legend-emg" class="band-legend"></div>
+          </div>
+          <div class="column-subheads">
+            <span class="subhead-raw">Raw µV</span>
+            <span class="subhead-filtered">Filtered µV</span>
+            <span class="subhead-bands">Band power</span>
+          </div>
+          <div class="plot-stack" id="stack-emg"></div>
+          <div class="column-x-label">Time (s)</div>
+        </section>
+      </div>
+    </main>
+    <section id="audio-strip" class="audio-strip">
+      <div class="audio-head">Headset mic</div>
+      <div class="audio-plot">
+        <canvas id="audio-canvas"></canvas>
+        <p id="audio-disabled" class="audio-disabled">audio disabled</p>
+      </div>
+    </section>
+    <section id="impedance-bar" class="impedance-bar">
+      <button type="button" id="btn-impedance">Read impedance</button>
+      <p id="impedance-hint" class="impedance-hint hidden">waiting for the headset…</p>
+      <div id="impedance-list" class="impedance-list"></div>
+    </section>
+    <div id="subject-gate" class="subject-gate hidden" role="dialog" aria-modal="true" aria-labelledby="subject-gate-title">
+      <div class="subject-gate-card">
+        <h2 id="subject-gate-title">Choose subject</h2>
+        <p class="subject-gate-hint">Sessions are saved under this subject and labeled with their id.</p>
+        <div id="subject-list" class="subject-list"></div>
+        <form id="subject-create" class="subject-create">
+          <input type="text" id="subject-name" maxlength="80" placeholder="New subject name" autocomplete="off" />
+          <button type="submit" id="btn-subject-create">Create</button>
+        </form>
+        <p id="subject-gate-error" class="subject-gate-error hidden"></p>
+      </div>
+    </div>
+    <div id="toast" class="toast hidden"></div>
+
+    <script src="{{ url_for('static', filename='monitor.js') }}"></script>
+  </body>
+</html>

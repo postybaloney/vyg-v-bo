@@ -1,0 +1,13 @@
+# Target labels
+ bootloader
+# Source files and their labels
+D:/vyg-emg1/firmware/build-win/CMakeFiles/bootloader
+D:/vyg-emg1/firmware/build-win/CMakeFiles/bootloader.rule
+D:/vyg-emg1/firmware/build-win/CMakeFiles/bootloader-complete.rule
+D:/vyg-emg1/firmware/build-win/bootloader-prefix/src/bootloader-stamp/bootloader-build.rule
+D:/vyg-emg1/firmware/build-win/bootloader-prefix/src/bootloader-stamp/bootloader-configure.rule
+D:/vyg-emg1/firmware/build-win/bootloader-prefix/src/bootloader-stamp/bootloader-download.rule
+D:/vyg-emg1/firmware/build-win/bootloader-prefix/src/bootloader-stamp/bootloader-install.rule
+D:/vyg-emg1/firmware/build-win/bootloader-prefix/src/bootloader-stamp/bootloader-mkdir.rule
+D:/vyg-emg1/firmware/build-win/bootloader-prefix/src/bootloader-stamp/bootloader-patch.rule
+D:/vyg-emg1/firmware/build-win/bootloader-prefix/src/bootloader-stamp/bootloader-update.rule

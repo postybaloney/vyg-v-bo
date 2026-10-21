@@ -1,0 +1,21 @@
+Command: ninja all
+[0/1] Re-running CMake...
+-- Minimal build - OFF
+-- ccache will be used for faster recompilation
+-- Building ESP-IDF components for target esp32c3
+-- KCONFIG_REPORT_VERBOSITY not set, using default
+-- Project sdkconfig file D:/vyg-emg1/firmware/sdkconfig
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Adding linker script C:/esp/v6.1/esp-idf/components/riscv/ld/rom.api.ld
+-- App "eeg_fw" version: usb-eeg1-checkpoint-dirty

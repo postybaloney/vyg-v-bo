@@ -1,0 +1,28 @@
+esp-idf/protocomm/CMakeFiles/__idf_protocomm.dir/proto-c/sec0.pb-c.c.obj: \
+ /Users/ivanbokarev/esp/esp-idf/components/protocomm/proto-c/sec0.pb-c.c \
+ /Users/ivanbokarev/esp/esp-idf/components/protocomm/proto-c/sec0.pb-c.h \
+ /Users/ivanbokarev/esp/esp-idf/components/protobuf-c/protobuf-c/protobuf-c/protobuf-c.h \
+ /Users/ivanbokarev/esp/esp-idf/components/esp_libc/platform_include/assert.h \
+ /Users/ivanbokarev/code/vyg-v0/firmware/build/config/sdkconfig.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/stdlib.h \
+ /Users/ivanbokarev/esp/esp-idf/components/esp_libc/platform_include/sys/cdefs.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/sys/cdefs.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/sys/config.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/machine/ieeefp.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/sys/features.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/picolibc.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/lib/gcc/riscv32-esp-elf/15.2.0/include/float.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/machine/_default_types.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/stdint.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/lib/gcc/riscv32-esp-elf/15.2.0/include/stddef.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/sys/_intsup.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/sys/_stdint.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/machine/stdlib.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/alloca.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/sys/_locale.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/sys/_wait.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/assert.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/limits.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/sys/syslimits.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/lib/gcc/riscv32-esp-elf/15.2.0/include/limits.h \
+ /Users/ivanbokarev/esp/esp-idf/components/protocomm/proto-c/constants.pb-c.h

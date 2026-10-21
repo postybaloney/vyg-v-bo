@@ -1,0 +1,4 @@
+Command: make -j 12 all
+NOTE: /Users/ivanbokarev/esp/esp-idf/components/bt/host/nimble/Kconfig.in:1421: BT_NIMBLE_MESH_PROVISIONER: 'default 0' is not a valid bool value (only 'y' and 'n' are allowed). Value is treated as 'n'.
+NOTE: /Users/ivanbokarev/esp/esp-idf/components/fatfs/Kconfig:240: FATFS_PRINT_LLI: 'default 0' is not a valid bool value (only 'y' and 'n' are allowed). Value is treated as 'n'.
+NOTE: /Users/ivanbokarev/esp/esp-idf/components/fatfs/Kconfig:245: FATFS_PRINT_FLOAT: 'default 0' is not a valid bool value (only 'y' and 'n' are allowed). Value is treated as 'n'.

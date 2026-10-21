@@ -1,0 +1,13 @@
+# Target labels
+ bootloader
+# Source files and their labels
+/Users/ivanbokarev/code/vyg-v0/firmware/build/CMakeFiles/bootloader
+/Users/ivanbokarev/code/vyg-v0/firmware/build/CMakeFiles/bootloader.rule
+/Users/ivanbokarev/code/vyg-v0/firmware/build/CMakeFiles/bootloader-complete.rule
+/Users/ivanbokarev/code/vyg-v0/firmware/build/bootloader-prefix/src/bootloader-stamp/bootloader-build.rule
+/Users/ivanbokarev/code/vyg-v0/firmware/build/bootloader-prefix/src/bootloader-stamp/bootloader-configure.rule
+/Users/ivanbokarev/code/vyg-v0/firmware/build/bootloader-prefix/src/bootloader-stamp/bootloader-download.rule
+/Users/ivanbokarev/code/vyg-v0/firmware/build/bootloader-prefix/src/bootloader-stamp/bootloader-install.rule
+/Users/ivanbokarev/code/vyg-v0/firmware/build/bootloader-prefix/src/bootloader-stamp/bootloader-mkdir.rule
+/Users/ivanbokarev/code/vyg-v0/firmware/build/bootloader-prefix/src/bootloader-stamp/bootloader-patch.rule
+/Users/ivanbokarev/code/vyg-v0/firmware/build/bootloader-prefix/src/bootloader-stamp/bootloader-update.rule

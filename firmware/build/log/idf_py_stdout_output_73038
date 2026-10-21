@@ -1,0 +1,5 @@
+Command: make -j 12 all
+-- Component directory /Users/ivanbokarev/esp/esp-idf/components/idf_test does not contain a CMakeLists.txt file. No component will be added
+-- Minimal build - OFF
+-- Building ESP-IDF components for target esp32c3
+-- Configuring incomplete, errors occurred!

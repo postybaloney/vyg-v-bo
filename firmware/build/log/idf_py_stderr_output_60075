@@ -1,0 +1,102 @@
+Command: make -j 12 all
+NOTE: /Users/ivanbokarev/esp/esp-idf/components/bt/host/nimble/Kconfig.in:1421: BT_NIMBLE_MESH_PROVISIONER: 'default 0' is not a valid bool value (only 'y' and 'n' are allowed). Value is treated as 'n'.
+NOTE: /Users/ivanbokarev/esp/esp-idf/components/fatfs/Kconfig:240: FATFS_PRINT_LLI: 'default 0' is not a valid bool value (only 'y' and 'n' are allowed). Value is treated as 'n'.
+NOTE: /Users/ivanbokarev/esp/esp-idf/components/fatfs/Kconfig:245: FATFS_PRINT_FLOAT: 'default 0' is not a valid bool value (only 'y' and 'n' are allowed). Value is treated as 'n'.
+NOTE: /Users/ivanbokarev/esp/esp-idf/components/bt/sdkconfig.rename.esp32c3:4: duplicate rename mapping for CONFIG_BT_NIMBLE_COEX_PHY_CODED_TX_RX_TLIM_EN: previous target CONFIG_BT_LE_COEX_PHY_CODED_TX_RX_TLIM_EN, new target CONFIG_BT_CTRL_COEX_PHY_CODED_TX_RX_TLIM_EN - last mapping is used
+NOTE: /Users/ivanbokarev/esp/esp-idf/components/bt/sdkconfig.rename.esp32c3:5: duplicate rename mapping for CONFIG_BT_NIMBLE_COEX_PHY_CODED_TX_RX_TLIM_DIS: previous target CONFIG_BT_LE_COEX_PHY_CODED_TX_RX_TLIM_DIS, new target CONFIG_BT_CTRL_COEX_PHY_CODED_TX_RX_TLIM_DIS - last mapping is used
+Loading defaults file /Users/ivanbokarev/code/vyg-v0/firmware/sdkconfig.defaults...
+NOTE: Kconfig parser version: 1
+NOTE: Kconfig defaults policy: use sdkconfig
+NOTE: Status: Finished successfully
+CMake Warning at /Users/ivanbokarev/esp/esp-idf/tools/cmake/component_validation.cmake:106 (message):
+  Private include directory
+  '/Users/ivanbokarev/esp/esp-idf/components/esp_wifi/wifi_apps/roaming_app/include'
+  belongs to component esp_wifi but is being used by component
+  wpa_supplicant.  It is recommended to define the component dependency for
+  wpa_supplicant on the component esp_wifi, i.e.  'idf_component_register(...
+  PRIV_REQUIRES esp_wifi)' in the CMakeLists.txt of wpa_supplicant, and
+  specify the included directory as idf_component_register(...
+  PRIV_INCLUDE_DIRS <dir relative to component>) in the CMakeLists.txt of
+  component esp_wifi.
+Call Stack (most recent call first):
+  /Users/ivanbokarev/esp/esp-idf/tools/cmake/component_validation.cmake:130 (__component_validation_check_include_dirs)
+  /Users/ivanbokarev/esp/esp-idf/CMakeLists.txt:353 (__component_validation_run_checks)
+
+
+CMake Warning at /Users/ivanbokarev/esp/esp-idf/tools/cmake/component_validation.cmake:106 (message):
+  Private include directory
+  '/Users/ivanbokarev/esp/esp-idf/components/esp_wifi/wifi_apps/roaming_app/src'
+  belongs to component esp_wifi but is being used by component
+  wpa_supplicant.  It is recommended to define the component dependency for
+  wpa_supplicant on the component esp_wifi, i.e.  'idf_component_register(...
+  PRIV_REQUIRES esp_wifi)' in the CMakeLists.txt of wpa_supplicant, and
+  specify the included directory as idf_component_register(...
+  PRIV_INCLUDE_DIRS <dir relative to component>) in the CMakeLists.txt of
+  component esp_wifi.
+Call Stack (most recent call first):
+  /Users/ivanbokarev/esp/esp-idf/tools/cmake/component_validation.cmake:130 (__component_validation_check_include_dirs)
+  /Users/ivanbokarev/esp/esp-idf/CMakeLists.txt:353 (__component_validation_run_checks)
+
+
+CMake Warning at /Users/ivanbokarev/esp/esp-idf/tools/cmake/component_validation.cmake:106 (message):
+  Private include directory
+  '/Users/ivanbokarev/esp/esp-idf/components/wpa_supplicant/src' belongs to
+  component wpa_supplicant but is being used by component esp_wifi.  It is
+  recommended to define the component dependency for esp_wifi on the
+  component wpa_supplicant, i.e.  'idf_component_register(...  PRIV_REQUIRES
+  wpa_supplicant)' in the CMakeLists.txt of esp_wifi, and specify the
+  included directory as idf_component_register(...  PRIV_INCLUDE_DIRS <dir
+  relative to component>) in the CMakeLists.txt of component wpa_supplicant.
+Call Stack (most recent call first):
+  /Users/ivanbokarev/esp/esp-idf/tools/cmake/component_validation.cmake:130 (__component_validation_check_include_dirs)
+  /Users/ivanbokarev/esp/esp-idf/CMakeLists.txt:353 (__component_validation_run_checks)
+
+
+CMake Warning at /Users/ivanbokarev/esp/esp-idf/tools/cmake/component_validation.cmake:106 (message):
+  Private include directory
+  '/Users/ivanbokarev/esp/esp-idf/components/wpa_supplicant/esp_supplicant/src'
+  belongs to component wpa_supplicant but is being used by component
+  esp_wifi.  It is recommended to define the component dependency for
+  esp_wifi on the component wpa_supplicant, i.e.  'idf_component_register(...
+  PRIV_REQUIRES wpa_supplicant)' in the CMakeLists.txt of esp_wifi, and
+  specify the included directory as idf_component_register(...
+  PRIV_INCLUDE_DIRS <dir relative to component>) in the CMakeLists.txt of
+  component wpa_supplicant.
+Call Stack (most recent call first):
+  /Users/ivanbokarev/esp/esp-idf/tools/cmake/component_validation.cmake:130 (__component_validation_check_include_dirs)
+  /Users/ivanbokarev/esp/esp-idf/CMakeLists.txt:353 (__component_validation_run_checks)
+
+
+In file included from /Users/ivanbokarev/code/vyg-v0/firmware/main/impedance.c:2:
+/Users/ivanbokarev/code/vyg-v0/firmware/main/config.h:224:1: error: static assertion failed: "bias electrode is not enabled for sampling"
+  224 | _Static_assert(Z_SAMPLE_AT(Z_BIAS_ID), "bias electrode is not enabled for sampling");
+      | ^~~~~~~~~~~~~~
+In file included from /Users/ivanbokarev/code/vyg-v0/firmware/main/ads1299.c:3:
+/Users/ivanbokarev/code/vyg-v0/firmware/main/config.h:224:1: error: static assertion failed: "bias electrode is not enabled for sampling"
+  224 | _Static_assert(Z_SAMPLE_AT(Z_BIAS_ID), "bias electrode is not enabled for sampling");
+      | ^~~~~~~~~~~~~~
+In file included from /Users/ivanbokarev/code/vyg-v0/firmware/main/fpga.c:2:
+/Users/ivanbokarev/code/vyg-v0/firmware/main/config.h:224:1: error: static assertion failed: "bias electrode is not enabled for sampling"
+  224 | _Static_assert(Z_SAMPLE_AT(Z_BIAS_ID), "bias electrode is not enabled for sampling");
+      | ^~~~~~~~~~~~~~
+make[2]: *** [esp-idf/main/CMakeFiles/__idf_main.dir/fpga.c.obj] Error 1
+make[2]: *** Waiting for unfinished jobs....
+In file included from /Users/ivanbokarev/code/vyg-v0/firmware/main/link_ble.c:2:
+/Users/ivanbokarev/code/vyg-v0/firmware/main/config.h:224:1: error: static assertion failed: "bias electrode is not enabled for sampling"
+  224 | _Static_assert(Z_SAMPLE_AT(Z_BIAS_ID), "bias electrode is not enabled for sampling");
+      | ^~~~~~~~~~~~~~
+In file included from /Users/ivanbokarev/code/vyg-v0/firmware/main/main.c:18:
+/Users/ivanbokarev/code/vyg-v0/firmware/main/config.h:224:1: error: static assertion failed: "bias electrode is not enabled for sampling"
+  224 | _Static_assert(Z_SAMPLE_AT(Z_BIAS_ID), "bias electrode is not enabled for sampling");
+      | ^~~~~~~~~~~~~~
+make[2]: *** [esp-idf/main/CMakeFiles/__idf_main.dir/link_ble.c.obj] Error 1
+make[2]: *** [esp-idf/main/CMakeFiles/__idf_main.dir/ads1299.c.obj] Error 1
+make[2]: *** [esp-idf/main/CMakeFiles/__idf_main.dir/impedance.c.obj] Error 1
+make[2]: *** [esp-idf/main/CMakeFiles/__idf_main.dir/main.c.obj] Error 1
+In file included from /Users/ivanbokarev/code/vyg-v0/firmware/main/audio.c:9:
+/Users/ivanbokarev/code/vyg-v0/firmware/main/config.h:224:1: error: static assertion failed: "bias electrode is not enabled for sampling"
+  224 | _Static_assert(Z_SAMPLE_AT(Z_BIAS_ID), "bias electrode is not enabled for sampling");
+      | ^~~~~~~~~~~~~~
+make[2]: *** [esp-idf/main/CMakeFiles/__idf_main.dir/audio.c.obj] Error 1
+make[1]: *** [esp-idf/main/CMakeFiles/__idf_main.dir/all] Error 2
+make: *** [all] Error 2

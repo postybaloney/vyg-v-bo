@@ -1,0 +1,14 @@
+Command: cmake -G Ninja -B D:\vyg-emg1\firmware\build -DPYTHON_DEPS_CHECKED=1 -DPYTHON=C:\Espressif\tools\python\v6.1\venv\Scripts\python.exe -DESP_PLATFORM=1 -DCCACHE_ENABLE=True D:\vyg-emg1\firmware
+-- IDF_TARGET is not set, guessed 'esp32c3' from sdkconfig 'D:/vyg-emg1/firmware/sdkconfig'
+-- Found Git: C:/Users/DesaiVoyager/AppData/Local/Programs/Git/cmd/git.exe (found version "2.56.0.windows.2")
+-- Minimal build - OFF
+-- ccache will be used for faster recompilation
+-- The C compiler identification is GNU 15.2.0
+-- The CXX compiler identification is GNU 15.2.0
+-- The ASM compiler identification is GNU
+-- Found assembler: C:/Espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/bin/riscv32-esp-elf-gcc.exe
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - failed
+-- Check for working C compiler: C:/Espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/bin/riscv32-esp-elf-gcc.exe
+-- Check for working C compiler: C:/Espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/bin/riscv32-esp-elf-gcc.exe - broken
+-- Configuring incomplete, errors occurred!

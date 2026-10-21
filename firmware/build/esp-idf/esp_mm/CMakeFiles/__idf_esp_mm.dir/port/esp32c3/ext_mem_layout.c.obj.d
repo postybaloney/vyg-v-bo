@@ -1,0 +1,28 @@
+esp-idf/esp_mm/CMakeFiles/__idf_esp_mm.dir/port/esp32c3/ext_mem_layout.c.obj: \
+ /Users/ivanbokarev/esp/esp-idf/components/esp_mm/port/esp32c3/ext_mem_layout.c \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/stdlib.h \
+ /Users/ivanbokarev/esp/esp-idf/components/esp_libc/platform_include/sys/cdefs.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/sys/cdefs.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/sys/config.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/machine/ieeefp.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/sys/features.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/picolibc.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/lib/gcc/riscv32-esp-elf/15.2.0/include/float.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/machine/_default_types.h \
+ /Users/ivanbokarev/code/vyg-v0/firmware/build/config/sdkconfig.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/stdint.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/lib/gcc/riscv32-esp-elf/15.2.0/include/stddef.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/sys/_intsup.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/sys/_stdint.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/machine/stdlib.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/alloca.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/sys/_locale.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/sys/_wait.h \
+ /Users/ivanbokarev/esp/esp-idf/components/soc/esp32c3/include/soc/ext_mem_defs.h \
+ /Users/ivanbokarev/esp/esp-idf/components/esp_common/include/esp_bit_defs.h \
+ /Users/ivanbokarev/esp/esp-idf/components/esp_mm/include/../ext_mem_layout.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/lib/gcc/riscv32-esp-elf/15.2.0/include/stdbool.h \
+ /Users/ivanbokarev/esp/esp-idf/components/soc/esp32c3/include/soc/soc_caps.h \
+ /Users/ivanbokarev/esp/esp-idf/components/soc/include/soc/soc_caps_eval.h \
+ /Users/ivanbokarev/esp/esp-idf/components/hal/include/hal/cache_types.h \
+ /Users/ivanbokarev/esp/esp-idf/components/hal/include/hal/mmu_types.h

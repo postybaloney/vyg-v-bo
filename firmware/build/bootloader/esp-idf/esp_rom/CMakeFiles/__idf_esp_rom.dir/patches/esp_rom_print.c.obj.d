@@ -1,0 +1,32 @@
+esp-idf/esp_rom/CMakeFiles/__idf_esp_rom.dir/patches/esp_rom_print.c.obj: \
+ /Users/ivanbokarev/esp/esp-idf/components/esp_rom/patches/esp_rom_print.c \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/stdint.h \
+ /Users/ivanbokarev/esp/esp-idf/components/esp_libc/platform_include/sys/cdefs.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/sys/cdefs.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/sys/config.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/machine/ieeefp.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/sys/features.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/picolibc.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/lib/gcc/riscv32-esp-elf/15.2.0/include/float.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/machine/_default_types.h \
+ /Users/ivanbokarev/code/vyg-v0/firmware/build/bootloader/config/sdkconfig.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/lib/gcc/riscv32-esp-elf/15.2.0/include/stddef.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/sys/_intsup.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/sys/_stdint.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/lib/gcc/riscv32-esp-elf/15.2.0/include/stdbool.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/lib/gcc/riscv32-esp-elf/15.2.0/include/stdarg.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/sys/param.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/sys/syslimits.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/machine/endian.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/sys/_types.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/machine/_types.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/machine/_endian.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/machine/param.h \
+ /Users/ivanbokarev/esp/esp-idf/components/esp_rom/esp32c3/esp_rom_caps.h \
+ /Users/ivanbokarev/esp/esp-idf/components/esp_rom/include/esp_rom_sys.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/inttypes.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/sys/_locale.h \
+ /Users/ivanbokarev/esp/esp-idf/components/soc/esp32c3/include/soc/reset_reasons.h \
+ /Users/ivanbokarev/esp/esp-idf/components/soc/esp32c3/include/soc/soc_caps.h \
+ /Users/ivanbokarev/esp/esp-idf/components/soc/include/soc/soc_caps_eval.h \
+ /Users/ivanbokarev/esp/esp-idf/components/esp_rom/esp32c3/include/esp32c3/rom/ets_sys.h

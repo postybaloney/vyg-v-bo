@@ -1,0 +1,3389 @@
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import math
+import queue
+import random
+import signal
+import struct
+import sys
+import threading
+import time
+import uuid
+from collections import deque
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from enum import Enum
+from pathlib import Path
+from typing import Any, Optional
+
+import numpy as np
+import serial
+from flask import Flask, jsonify, render_template, request
+from serial.tools import list_ports
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_MODEL_ROOT = _REPO_ROOT / "model"
+if _MODEL_ROOT.is_dir() and str(_MODEL_ROOT) not in sys.path:
+    sys.path.insert(0, str(_MODEL_ROOT))
+
+from train import default_checkpoint_path, get_device
+from eval import load_checkpoint
+from infer import fix_window_length, predict_fusion_batch
+from _preprocessors import (
+    DEFAULT_EEG_BANDPASS_CONFIG,
+    DEFAULT_EMG_BANDPASS_CONFIG,
+    DEFAULT_LINE_NOISE_CONFIG,
+    preprocess_session_channels,
+)
+from _protocol import (
+    CHANNEL_COUNT,
+    CHANNEL_UNITS,
+    EEG_COUNT,
+    EEG_LSB_UV,
+    EEG_RECORD_FORMAT,
+    EMG_LSB_UV,
+    AUDIO_ENABLED,
+    DATA_LINK,
+    AUDIO_RATE_HZ,
+    AUDIO_SAMPLES,
+    HOST_CMD_AUDIO,
+    HOST_CMD_MAGIC,
+    HOST_CMD_Z_OFF,
+    HOST_CMD_Z_ON,
+    AudioFrame,
+    BootSession,
+    ImpedanceWave,
+    SampleFrame,
+    ads_calibration_metadata,
+    find_esp_port,
+    run_boot_test,
+    wait_port,
+)
+from _audio_ble import BleReader
+from _impedance import Z_ELECTRODES, _adc_of_ui, _sense_adc, _ui_index, impedances_from_wave
+from _protocol import Z_ENABLED as Z_ADC_ENABLED
+from _protocol import Z_REF_BIAS_ENABLED
+
+import sounddevice as sd
+import torch
+
+try:
+    import whisper
+except:
+    whiper = None
+
+SAMPLE_RATE_HZ = 1000
+WINDOW_SECONDS = 2
+FILTER_BUFFER_SECONDS = 4
+UPDATE_HZ = 30
+CHANNELS_PER_PAGE = 8
+PLOT_POINTS = 400
+DEFAULT_BAUD = 2_000_000
+DEFAULT_RECORDINGS_DIR = _REPO_ROOT / "recordings"
+ALIGNMENT_WINDOW_FRAMES = 512
+THINKING_COUNTDOWN_SECONDS = 3
+COLLECTION_WORDS = ("highlight", "bullshit", "gogogo", "shitbull", "naan", "halloween", "glue")
+SPEAKER_TEST_SENTENCES = (
+    "The quick brown fox jumps over the lazy dog.",
+    "Please count to five and then stay still.",
+    "A red balloon floated over the quiet lake.",
+    "She opened the window and listened to the rain.",
+    "Turn your head slowly to the left.",
+    "The headset is recording sixteen channels.",
+    "Blue light means the battery is charging.",
+    "Say the word again when the prompt appears.",
+)
+COLLECTION_WORD_DEFAULT_WEIGHTS: dict[str, float] = {
+    "highlight": 1.0,
+    "bullshit": 1.0,
+    "gogogo": 1.0,
+    "shitbull": 0.0,
+    "naan": 0.0,
+    "halloween": 0.0,
+    "glue": 0.0
+}
+COLLECTION_REPETITIONS = 7
+WORD_WEIGHT_MIN = 0.0
+WORD_WEIGHT_MAX = 1.0
+WORD_WEIGHT_STEP = 0.05
+WORD_WEIGHT_MIN_ACTIVE = 2
+OCCASIONAL_WORD_MIX_DEFAULT_WEIGHTS: dict[str, float] = {
+    "still": 0.50,
+    "collection_word": 0.50,
+}
+OCCASIONAL_WORD_MIX_LABELS: dict[str, str] = {
+    "still": "silence",
+    "collection_word": "collection words",
+}
+DEFAULT_NEGATIVE_WORD_RATE = 0.0
+
+
+def default_collection_word_weights() -> dict[str, float]:
+    return {
+        word: clamp_unit_weight(COLLECTION_WORD_DEFAULT_WEIGHTS.get(word, 0.35))
+        for word in COLLECTION_WORDS
+    }
+
+
+def default_occasional_word_mix_weights() -> dict[str, float]:
+    return {
+        key: clamp_unit_weight(OCCASIONAL_WORD_MIX_DEFAULT_WEIGHTS.get(key, 0.0))
+        for key in OCCASIONAL_WORD_MIX_DEFAULT_WEIGHTS
+    }
+
+
+def clamp_unit_weight(value: float) -> float:
+    return max(WORD_WEIGHT_MIN, min(WORD_WEIGHT_MAX, float(value)))
+
+
+def clamp_collection_word_weight(value: float) -> float:
+    return clamp_unit_weight(value)
+
+
+def active_word_weight_count(weights: dict[str, Any]) -> int:
+    return sum(
+        1
+        for word in COLLECTION_WORDS
+        if clamp_collection_word_weight(weights.get(word, 0.0)) > 0.0
+    )
+# Collection timing hyperparameters (seconds) — edit these to tune the protocol
+COLLECTION_BEFORE_S = 1.0
+COLLECTION_BETWEEN_S = 0.4
+COLLECTION_SAY_S = 1.6
+ALIGNMENT_TEST_PAD_S = 0.3
+ALIGNMENT_TEST_DISPLAY_CHANNELS = tuple(range(8))
+MODEL_TEST_TRIALS = 3
+MODEL_USE_INTERVAL_S = 0.4
+MODEL_USE_WINDOW_S = COLLECTION_SAY_S
+DEFAULT_SCRAMBLE_SET = 5
+DEFAULT_SCRAMBLE_REP = 5
+SCRAMBLE_SET_MIN = 1
+SCRAMBLE_SET_MAX = 20
+SCRAMBLE_REP_MIN = 1
+SCRAMBLE_REP_MAX = 20
+OCCASIONAL_WORD_STILL_MIN_S = 1.0
+OCCASIONAL_WORD_STILL_MAX_S = 20.0
+OCCASIONAL_WORD_WORD_COUNT = 15
+OCCASIONAL_WORD_POOL = (
+    "sidewalk",
+    "umbrella",
+    "keyboard",
+    "backward",
+    "sunshine",
+    "notebook",
+    "sandwich",
+    "football",
+    "standard",
+    "platform",
+    "wildcard",
+    "backpack",
+    "handbook",
+    "doorstep",
+    "headline",
+    "goldmine",
+    "basement",
+    "countdown",
+    "bookmark",
+    "lukewarm",
+    "turnover",
+    "backyard",
+    "doorbell",
+    "flashbulb",
+    "handrail",
+)
+SPEECH_AUDIO_RATE_HZ = 16000
+SPEECH_AUDIO_CHANNELS = 1
+RAIL_CODE_WARN = 0x7FFF00
+RAIL_WINDOW_FRAMES = 1000
+RAIL_WARN_PERCENT = 10.0
+DEFAULT_FIXED_SCALE_UV = 150.0
+DEFAULT_HTTP_PORT = 5050
+BAND_FRAME_SAMPLES = 512
+BAND_HOP_SAMPLES = 128
+BAND_PLOT_POINTS = 80
+
+EEG_BANDS: tuple[dict[str, Any], ...] = (
+    {"id": "delta", "name": "Delta", "range": "0.5–4 Hz", "low_hz": 0.5, "high_hz": 4.0, "color": "#9b59b6"},
+    {"id": "theta", "name": "Theta", "range": "4–8 Hz", "low_hz": 4.0, "high_hz": 8.0, "color": "#3498db"},
+    {"id": "mu", "name": "Mu", "range": "8–12 Hz", "low_hz": 8.0, "high_hz": 12.0, "color": "#1abc9c"},
+    {"id": "alpha", "name": "Alpha", "range": "8–13 Hz", "low_hz": 8.0, "high_hz": 13.0, "color": "#2ecc71"},
+    {"id": "beta", "name": "Beta", "range": "13–30 Hz", "low_hz": 13.0, "high_hz": 30.0, "color": "#f1c40f"},
+    {"id": "gamma", "name": "Gamma", "range": "30–100 Hz", "low_hz": 30.0, "high_hz": 100.0, "color": "#e67e22"},
+    {"id": "high_gamma", "name": "High Gamma", "range": ">100 Hz", "low_hz": 100.0, "high_hz": None, "color": "#e74c3c"},
+)
+
+EMG_BANDS: tuple[dict[str, Any], ...] = (
+    {"id": "low", "name": "Low", "range": "20–60 Hz", "low_hz": 20.0, "high_hz": 60.0, "color": "#5dade2"},
+    {"id": "mid", "name": "Mid", "range": "60–150 Hz", "low_hz": 60.0, "high_hz": 150.0, "color": "#58d68d"},
+    {"id": "high", "name": "High", "range": "150–500 Hz", "low_hz": 150.0, "high_hz": 500.0, "color": "#f5b041"},
+)
+
+
+def channel_name(channel_idx: int) -> str:
+    if channel_idx < EEG_COUNT:
+        return f"EEG{channel_idx + 1}"
+    return f"EMG{channel_idx - EEG_COUNT + 1}"
+
+
+def channel_order_dict(channel_count: int) -> dict[str, str]:
+    return {str(i): channel_name(i) for i in range(channel_count)}
+
+
+def new_session_dir_name(now: datetime | None = None) -> str:
+    """e.g. 2026-06-15_21-27-46_session_a3f8b2c1"""
+    when = now or datetime.now()
+    uid = uuid.uuid4().hex[:8]
+    stamp = when.strftime("%Y-%m-%d_%H-%M-%S")
+    return f"{stamp}_session_{uid}"
+
+
+SUBJECTS_FILE_NAME = "subjects.json"
+SUBJECT_NAME_MAX_LEN = 80
+
+
+def _safe_subject_id(subject_id: str) -> str:
+    subject_id = subject_id.strip()
+    if (
+        not subject_id
+        or subject_id in {".", ".."}
+        or any(char in subject_id for char in "/\\")
+    ):
+        raise RuntimeError("Invalid subject id")
+    return subject_id
+
+
+def _read_session_subject_id(session_dir: Path) -> str:
+    meta_path = session_dir / "session_meta.json"
+    if not meta_path.is_file():
+        return ""
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not isinstance(meta, dict):
+        return ""
+    return str(meta.get("subject_id") or "").strip()
+
+
+def subject_session_counts(recordings_dir: Path) -> dict[str, int]:
+    """Count sessions whose session_meta.json names each subject id."""
+    counts: dict[str, int] = {}
+    if not recordings_dir.is_dir():
+        return counts
+
+    def consider(session_dir: Path) -> None:
+        subject_id = _read_session_subject_id(session_dir)
+        if subject_id:
+            counts[subject_id] = counts.get(subject_id, 0) + 1
+
+    for child in recordings_dir.iterdir():
+        if not child.is_dir():
+            continue
+        if (child / "session_meta.json").is_file():
+            consider(child)
+            continue
+        for nested in child.iterdir():
+            if nested.is_dir():
+                consider(nested)
+    return counts
+
+
+class SubjectRegistry:
+    """recordings/subjects.json: subject id -> display name."""
+
+    def __init__(self, recordings_dir: Path) -> None:
+        self._dir = recordings_dir
+        self._path = recordings_dir / SUBJECTS_FILE_NAME
+        self._lock = threading.Lock()
+
+    def _load(self) -> dict[str, str]:
+        if not self._path.is_file():
+            return {}
+        try:
+            raw = json.loads(self._path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"Could not read {self._path.name}") from exc
+        if not isinstance(raw, dict):
+            raise RuntimeError(f"{self._path.name} must map subject id to name")
+        subjects: dict[str, str] = {}
+        for key, value in raw.items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                raise RuntimeError(f"{self._path.name} must map subject id to name")
+            subject_id = key.strip()
+            name = value.strip()
+            if not subject_id or not name:
+                raise RuntimeError(f"{self._path.name} has an empty subject id or name")
+            subjects[subject_id] = name
+        return subjects
+
+    def _save(self, subjects: dict[str, str]) -> None:
+        self._dir.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(subjects, indent=2, ensure_ascii=False) + "\n"
+        tmp = self._path.with_suffix(".json.tmp")
+        tmp.write_text(payload, encoding="utf-8")
+        tmp.replace(self._path)
+
+    def list_subjects(self) -> list[dict[str, Any]]:
+        with self._lock:
+            subjects = self._load()
+        counts = subject_session_counts(self._dir)
+        items = [
+            {
+                "id": subject_id,
+                "name": name,
+                "session_count": int(counts.get(subject_id, 0)),
+            }
+            for subject_id, name in subjects.items()
+        ]
+        items.sort(key=lambda item: (item["name"].casefold(), item["id"]))
+        return items
+
+    def name_for(self, subject_id: str) -> str:
+        subject_id = _safe_subject_id(subject_id)
+        with self._lock:
+            subjects = self._load()
+        name = subjects.get(subject_id)
+        if name is None:
+            raise RuntimeError("Unknown subject")
+        return name
+
+    def create(self, name: str) -> dict[str, Any]:
+        cleaned = " ".join(name.split())
+        if not cleaned:
+            raise RuntimeError("Subject name is required")
+        if len(cleaned) > SUBJECT_NAME_MAX_LEN:
+            raise RuntimeError("Subject name is too long")
+        with self._lock:
+            subjects = self._load()
+            subject_id = ""
+            for _ in range(8):
+                candidate = uuid.uuid4().hex[:8]
+                if candidate not in subjects:
+                    subject_id = candidate
+                    break
+            if not subject_id:
+                raise RuntimeError("Could not allocate a subject id")
+            subjects[subject_id] = cleaned
+            self._save(subjects)
+        return {"id": subject_id, "name": cleaned, "session_count": 0}
+
+
+def bands_for_channel(channel_idx: int) -> tuple[dict[str, Any], ...]:
+    return EEG_BANDS if channel_idx < EEG_COUNT else EMG_BANDS
+
+
+def _ordered_buffer_view(buffer_uv: np.ndarray, write_idx: int) -> np.ndarray:
+    """Return ring buffer contents in chronological order (oldest sample first)."""
+    if write_idx == 0:
+        return buffer_uv
+    return np.concatenate(
+        (buffer_uv[:, write_idx:], buffer_uv[:, :write_idx]),
+        axis=1,
+    )
+
+
+def _preprocess_monitor_window(view: np.ndarray, sample_rate_hz: float) -> np.ndarray:
+    """Apply line notch + band-pass for live plots (causal notch on sliding windows)."""
+    block = np.asarray(view, dtype=np.float32).T  # (time, channels)
+    filtered = preprocess_session_channels(
+        block,
+        sample_rate_hz,
+        line_noise=DEFAULT_LINE_NOISE_CONFIG,
+        eeg=DEFAULT_EEG_BANDPASS_CONFIG,
+        emg=DEFAULT_EMG_BANDPASS_CONFIG,
+        zero_phase=False,
+    )
+    return filtered.T
+
+
+def _band_power_series(
+    signal: np.ndarray,
+    sample_rate_hz: float,
+    bands: tuple[dict[str, Any], ...],
+    *,
+    frame_samples: int = BAND_FRAME_SAMPLES,
+    hop_samples: int = BAND_HOP_SAMPLES,
+) -> tuple[np.ndarray, list[dict[str, Any]]]:
+    """Short-time band power over the trailing window (one value per hop)."""
+    n = int(signal.shape[0])
+    if n < frame_samples:
+        empty_t = np.linspace(-WINDOW_SECONDS, 0, 1, dtype=np.float32)
+        empty_bands = [
+            {"id": b["id"], "name": b["name"], "range": b["range"], "color": b["color"], "y": [0.0]}
+            for b in bands
+        ]
+        return empty_t, empty_bands
+
+    window = np.hanning(frame_samples).astype(np.float64)
+    freqs = np.fft.rfftfreq(frame_samples, d=1.0 / sample_rate_hz)
+    nyquist = sample_rate_hz / 2.0
+    starts = np.arange(0, n - frame_samples + 1, hop_samples, dtype=np.int64)
+    if starts.size == 0:
+        starts = np.array([0], dtype=np.int64)
+
+    band_powers: list[list[float]] = [[] for _ in bands]
+    for start in starts:
+        segment = signal[start : start + frame_samples].astype(np.float64)
+        spectrum = np.fft.rfft(segment * window)
+        power = (np.abs(spectrum) ** 2) / frame_samples
+        for band_idx, band in enumerate(bands):
+            low_hz = float(band["low_hz"])
+            high_hz = band.get("high_hz")
+            high_cut = nyquist if high_hz is None else min(float(high_hz), nyquist)
+            mask = (freqs >= low_hz) & (freqs < high_cut)
+            if not np.any(mask):
+                band_powers[band_idx].append(0.0)
+            else:
+                band_powers[band_idx].append(float(power[mask].sum()))
+
+    end_sample = int(starts[-1] + frame_samples)
+    time_s = (starts.astype(np.float64) + frame_samples * 0.5 - end_sample) / sample_rate_hz
+    series = [
+        {
+            "id": band["id"],
+            "name": band["name"],
+            "range": band["range"],
+            "color": band["color"],
+            "y": powers,
+        }
+        for band, powers in zip(bands, band_powers, strict=True)
+    ]
+    return time_s.astype(np.float32), series
+
+
+def _format_band_debug(channel_idx: int, signal: np.ndarray, series: list[dict[str, Any]]) -> str:
+    sig = np.asarray(signal, dtype=np.float64)
+    lines = [
+        (
+            f"[BANDS] {channel_name(channel_idx)} "
+            f"(preprocessed) mean={sig.mean():.1f} std={sig.std():.1f} "
+            f"min={sig.min():.1f} max={sig.max():.1f} µV "
+            f"({sig.size} samples)"
+        )
+    ]
+    for band in series:
+        y = np.asarray(band["y"], dtype=np.float64)
+        latest = float(y[-1]) if y.size else 0.0
+        lines.append(
+            f"  {band['name']:11s} min={y.min():.3g} max={y.max():.3g} latest={latest:.3g}"
+        )
+    return "\n".join(lines)
+
+
+def _downsample_band_series(
+    time_s: np.ndarray,
+    series: list[dict[str, Any]],
+    max_points: int = BAND_PLOT_POINTS,
+) -> tuple[list[float], list[dict[str, Any]]]:
+    n = int(time_s.shape[0])
+    if n <= max_points:
+        return time_s.astype(np.float32).tolist(), [
+            {
+                "id": s["id"],
+                "name": s["name"],
+                "range": s["range"],
+                "color": s["color"],
+                "y": [float(v) for v in s["y"]],
+            }
+            for s in series
+        ]
+    step = max(1, n // max_points)
+    idx = np.arange(0, n, step, dtype=np.int64)
+    return time_s[idx].astype(np.float32).tolist(), [
+        {
+            "id": s["id"],
+            "name": s["name"],
+            "range": s["range"],
+            "color": s["color"],
+            "y": [float(s["y"][i]) for i in idx],
+        }
+        for s in series
+    ]
+
+
+class SerialReader(threading.Thread):
+    def __init__(
+        self,
+        port: str,
+        baudrate: int,
+        out_queue: queue.Queue["RxFrame"],
+        z_queue: queue.Queue[ImpedanceWave],
+        audio_queue: queue.Queue[AudioFrame],
+        *,
+        boot: BootSession,
+    ) -> None:
+        super().__init__(daemon=True)
+        self._port = port
+        self._baudrate = baudrate
+        self._out_queue = out_queue
+        self._z_queue = z_queue
+        self._audio_queue = audio_queue
+        self._stop_event = threading.Event()
+        self._write_lock = threading.Lock()
+        self._ser = boot.serial
+        self.parser = boot.parser
+        self.last_error: Optional[str] = None
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+    def send_host_cmd(self, cmd: int) -> None:
+        # Write side of the USB serial. The reader thread only reads.
+        payload = HOST_CMD_MAGIC + bytes((cmd & 0xFF,))
+        with self._write_lock:
+            ser = self._ser
+            if ser is None or not ser.is_open:
+                raise RuntimeError("headset port is not open")
+            ser.write(payload)
+            ser.flush()
+
+    def send_audio_frame(self, seq: int, samples: np.ndarray) -> None:
+        pcm = np.ascontiguousarray(samples, dtype="<i2")
+        if pcm.shape != (AUDIO_SAMPLES,):
+            raise ValueError(f"expected {AUDIO_SAMPLES} samples, got {pcm.shape}")
+        payload = (
+            HOST_CMD_MAGIC
+            + bytes((HOST_CMD_AUDIO,))
+            + struct.pack("<IH", seq & 0xFFFFFFFF, AUDIO_SAMPLES)
+            + pcm.tobytes()
+        )
+        with self._write_lock:
+            ser = self._ser
+            if ser is None or not ser.is_open:
+                raise RuntimeError("headset port is not open")
+            ser.write(payload)
+            ser.flush()
+
+    def _enqueue_z(self, wave: ImpedanceWave) -> None:
+        try:
+            self._z_queue.put_nowait(wave)
+        except queue.Full:
+            try:
+                self._z_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._z_queue.put_nowait(wave)
+            except queue.Full:
+                pass
+
+    def _enqueue_audio(self, frame: AudioFrame) -> None:
+        try:
+            self._audio_queue.put_nowait(frame)
+        except queue.Full:
+            try:
+                self._audio_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._audio_queue.put_nowait(frame)
+            except queue.Full:
+                pass
+
+    def run(self) -> None:
+        ser = self._ser
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    chunk = ser.read(4096)
+                except serial.SerialException:
+                    print("usb dropped, reopening", file=sys.stderr)
+                    try:
+                        ser.close()
+                    except OSError:
+                        pass
+                    try:
+                        ser = wait_port(self._port, self._baudrate)
+                        self._ser = ser
+                    except Exception as exc:  # pylint: disable=broad-except
+                        self.last_error = str(exc)
+                        return
+                    continue
+                if not chunk:
+                    continue
+                for frame in self.parser.feed(chunk):
+                    self._out_queue.put(RxFrame(frame=frame, host_rx_time_ns=time.perf_counter_ns()))
+                for wave in self.parser.take_impedance():
+                    self._enqueue_z(wave)
+                for audio in self.parser.take_audio():
+                    self._enqueue_audio(audio)
+                for line in self.parser.take_logs():
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+        except Exception as exc:  # pylint: disable=broad-except
+            self.last_error = str(exc)
+        finally:
+            try:
+                ser.close()
+            except OSError:
+                pass
+
+
+class TestReader(threading.Thread):
+    EEG_AMPLITUDE_UV = 50.0
+    EMG_AMPLITUDE_UV = 120.0
+
+    def __init__(self, out_queue: queue.Queue["RxFrame"]) -> None:
+        super().__init__(daemon=True)
+        self._out_queue = out_queue
+        self._stop_event = threading.Event()
+        self.last_error: Optional[str] = None
+        self._sample_index = 0
+
+    def send_host_cmd(self, cmd: int) -> None:
+        return None
+
+    def send_audio_frame(self, seq: int, samples: np.ndarray) -> None:
+        return None
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+    def run(self) -> None:
+        try:
+            interval_s = 1.0 / SAMPLE_RATE_HZ
+            next_tick = time.perf_counter()
+            while not self._stop_event.is_set():
+                frame = self._make_frame(self._sample_index)
+                self._out_queue.put(RxFrame(frame=frame, host_rx_time_ns=time.perf_counter_ns()))
+                self._sample_index += 1
+                next_tick += interval_s
+                delay = next_tick - time.perf_counter()
+                if delay > 0:
+                    time.sleep(delay)
+                else:
+                    next_tick = time.perf_counter()
+        except Exception as exc:  # pylint: disable=broad-except
+            self.last_error = str(exc)
+
+    def _make_frame(self, sample_index: int) -> SampleFrame:
+        t = sample_index / SAMPLE_RATE_HZ
+        uv = np.zeros(CHANNEL_COUNT, dtype=np.float64)
+        for ch in range(CHANNEL_COUNT):
+            freq_hz = 2.0 + ch * 0.4
+            amp = self.EEG_AMPLITUDE_UV if ch < EEG_COUNT else self.EMG_AMPLITUDE_UV
+            phase = ch * (np.pi / 10.0)
+            uv[ch] = amp * np.sin(2.0 * np.pi * freq_hz * t + phase)
+
+        codes = np.zeros(CHANNEL_COUNT, dtype=np.int32)
+        codes[:EEG_COUNT] = np.round(uv[:EEG_COUNT] / EEG_LSB_UV).astype(np.int32)
+        codes[EEG_COUNT:] = np.round(uv[EEG_COUNT:] / EMG_LSB_UV).astype(np.int32)
+        return SampleFrame(
+            mcu_time_us=sample_index * 1000,
+            sample_index=sample_index,
+            channels_i32=codes,
+        )
+
+
+@dataclass(slots=True)
+class RxFrame:
+    frame: SampleFrame
+    host_rx_time_ns: int
+
+
+class TimeAligner:
+    def __init__(self, sample_rate_hz: int, max_points: int = ALIGNMENT_WINDOW_FRAMES) -> None:
+        self._sample_rate_hz = float(sample_rate_hz)
+        self._host_ns: deque[int] = deque(maxlen=max_points)
+        self._sample_idx: deque[int] = deque(maxlen=max_points)
+        self._latest_host_ns: Optional[int] = None
+        self._latest_sample_idx: Optional[int] = None
+
+    def update(self, sample_index: int, host_rx_time_ns: int) -> None:
+        self._host_ns.append(host_rx_time_ns)
+        self._sample_idx.append(sample_index)
+        self._latest_host_ns = host_rx_time_ns
+        self._latest_sample_idx = sample_index
+
+    def estimate_sample_float(self, event_host_ns: int) -> Optional[float]:
+        if len(self._host_ns) >= 2:
+            x = np.asarray(self._host_ns, dtype=np.float64)
+            y = np.asarray(self._sample_idx, dtype=np.float64)
+            x0 = x[0]
+            x_shift = x - x0
+            vx = np.var(x_shift)
+            if vx > 0.0:
+                cov = np.cov(x_shift, y, bias=True)[0, 1]
+                slope = cov / vx
+                intercept = float(y.mean() - slope * x_shift.mean())
+                return slope * (float(event_host_ns) - float(x0)) + intercept
+
+        if self._latest_host_ns is None or self._latest_sample_idx is None:
+            return None
+        dt_s = (event_host_ns - self._latest_host_ns) / 1e9
+        return float(self._latest_sample_idx) + dt_s * self._sample_rate_hz
+
+    @staticmethod
+    def quantize_sample_index(sample_float: Optional[float]) -> Optional[int]:
+        if sample_float is None:
+            return None
+        return int(round(sample_float))
+
+
+def say_window_sample_end(start_idx: int, start_float: float) -> tuple[int, float]:
+    """End sample for a collection say window (COLLECTION_SAY_S at SAMPLE_RATE_HZ)."""
+    end_float = start_float + COLLECTION_SAY_S * SAMPLE_RATE_HZ
+    end_idx = TimeAligner.quantize_sample_index(end_float) or int(round(end_float))
+    return end_idx, end_float
+
+
+class SessionRecorder:
+    def __init__(self, sample_rate_hz: int, channel_count: int) -> None:
+        self._sample_rate_hz = sample_rate_hz
+        self._channel_count = channel_count
+        self._session_dir: Optional[Path] = None
+        self._eeg_handle = None
+        self._events_handle = None
+        self._events_writer: Optional[csv.writer] = None
+        self._frames_since_flush = 0
+        self._lock = threading.Lock()
+        self._audio_wav = None
+        self._audio_since_flush = 0
+
+    @property
+    def enabled(self) -> bool:
+        with self._lock:
+            return self._eeg_handle is not None and self._events_writer is not None
+
+    @property
+    def session_dir(self) -> Optional[Path]:
+        with self._lock:
+            return self._session_dir
+
+    def start(self, base_dir: Path, *, subject_id: str, subject_name: str) -> Path:
+        subject_id = _safe_subject_id(subject_id)
+        subject_name = subject_name.strip()
+        if not subject_name:
+            raise RuntimeError("Choose a subject before recording")
+        with self._lock:
+            if self._eeg_handle is not None and self._events_writer is not None:
+                if not self._session_dir:
+                    raise RuntimeError("Recorder state invalid while enabled")
+                return self._session_dir
+
+            base_dir.mkdir(parents=True, exist_ok=True)
+            subject_root = base_dir / subject_id
+            subject_root.mkdir(parents=True, exist_ok=True)
+            base_name = new_session_dir_name()
+            session_dir = subject_root / base_name
+            suffix = 1
+            while session_dir.exists():
+                session_dir = subject_root / f"{base_name}_{suffix:02d}"
+                suffix += 1
+            session_dir.mkdir(parents=True, exist_ok=False)
+
+            meta = {
+                "created_at_iso": datetime.now(timezone.utc).isoformat(),
+                "subject_id": subject_id,
+                "subject_name": subject_name,
+                "sample_rate_hz": self._sample_rate_hz,
+                "channel_count": self._channel_count,
+                "channel_units": CHANNEL_UNITS,
+                "channel_order": channel_order_dict(self._channel_count),
+                "ads_calibration": ads_calibration_metadata(),
+                "files": {
+                    "eeg_frames": "eeg_frames.bin",
+                    "events": "events.csv",
+                },
+                "eeg_record_format": EEG_RECORD_FORMAT,
+            }
+            if AUDIO_ENABLED:
+                meta["files"]["headset_audio"] = "headset_audio.wav"
+                meta["headset_audio"] = {
+                    "sample_rate_hz": AUDIO_RATE_HZ,
+                    "channels": 1,
+                    "format": "int16",
+                    "file": "headset_audio.wav",
+                }
+            (session_dir / "session_meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+            self._session_dir = session_dir
+            self._eeg_handle = (session_dir / "eeg_frames.bin").open("wb")
+            self._events_handle = (session_dir / "events.csv").open("w", newline="", encoding="utf-8")
+            self._events_writer = csv.writer(self._events_handle)
+            self._events_writer.writerow(
+                [
+                    "event_id",
+                    "event_type",
+                    "label_text",
+                    "host_time_iso",
+                    "host_time_ns",
+                    "sample_index_start",
+                    "sample_index_start_float",
+                    "sample_index_end",
+                    "sample_index_end_float",
+                    "confidence",
+                    "alignment_method",
+                    "payload_json",
+                ]
+            )
+            self._events_handle.flush()
+            self._audio_wav = None
+            self._audio_since_flush = 0
+            if AUDIO_ENABLED:
+                import wave
+
+                self._audio_wav = wave.open(str(session_dir / "headset_audio.wav"), "wb")
+                self._audio_wav.setnchannels(1)
+                self._audio_wav.setsampwidth(2)
+                self._audio_wav.setframerate(AUDIO_RATE_HZ)
+            return session_dir
+
+    def stop(self) -> None:
+        with self._lock:
+            if self._eeg_handle is not None:
+                self._eeg_handle.flush()
+                self._eeg_handle.close()
+            if self._events_handle is not None:
+                self._events_handle.flush()
+                self._events_handle.close()
+            if self._audio_wav is not None:
+                self._audio_wav.close()
+            self._session_dir = None
+            self._eeg_handle = None
+            self._events_handle = None
+            self._events_writer = None
+            self._audio_wav = None
+            self._frames_since_flush = 0
+            self._audio_since_flush = 0
+
+    def append_frame(self, frame: SampleFrame) -> None:
+        with self._lock:
+            if not self._eeg_handle:
+                return
+            channels_uv = frame.channels_uv().astype(np.float32, copy=False).tolist()
+            payload = struct.pack(
+                EEG_RECORD_FORMAT,
+                int(frame.sample_index),
+                int(frame.mcu_time_us),
+                *channels_uv,
+            )
+            self._eeg_handle.write(payload)
+            self._frames_since_flush += 1
+            if self._frames_since_flush >= 250:
+                self._eeg_handle.flush()
+                self._frames_since_flush = 0
+
+    def append_audio(self, samples: np.ndarray) -> None:
+        pcm = np.ascontiguousarray(samples, dtype="<i2")
+        with self._lock:
+            if self._audio_wav is None or pcm.size == 0:
+                return
+            self._audio_wav.writeframes(pcm.tobytes())
+            self._audio_since_flush += int(pcm.size)
+            if self._audio_since_flush >= AUDIO_RATE_HZ:
+                fh = getattr(self._audio_wav, "_file", None)
+                if fh is not None:
+                    fh.flush()
+                self._audio_since_flush = 0
+
+    def log_event(
+        self,
+        event_type: str,
+        label_text: str = "",
+        *,
+        sample_index_start: Optional[int] = None,
+        sample_index_start_float: Optional[float] = None,
+        sample_index_end: Optional[int] = None,
+        sample_index_end_float: Optional[float] = None,
+        confidence: Optional[float] = None,
+        alignment_method: str = "",
+        payload: Optional[dict[str, Any]] = None,
+    ) -> None:
+        with self._lock:
+            if not self._events_writer or not self._events_handle:
+                return
+            host_iso = datetime.now(timezone.utc).isoformat()
+            host_ns = time.time_ns()
+            self._events_writer.writerow(
+                [
+                    uuid.uuid4().hex,
+                    event_type,
+                    label_text,
+                    host_iso,
+                    host_ns,
+                    "" if sample_index_start is None else sample_index_start,
+                    "" if sample_index_start_float is None else f"{sample_index_start_float:.6f}",
+                    "" if sample_index_end is None else sample_index_end,
+                    "" if sample_index_end_float is None else f"{sample_index_end_float:.6f}",
+                    "" if confidence is None else f"{confidence:.6f}",
+                    alignment_method,
+                    json.dumps(payload or {}, separators=(",", ":")),
+                ]
+            )
+            self._events_handle.flush()
+
+
+class SpeechAudioRecorder:
+    def __init__(self, samplerate: int, channels: int) -> None:
+        self._samplerate = samplerate
+        self._channels = channels
+        self._stream = None
+        self._file_handle = None
+        self._lock = threading.Lock()
+
+    @property
+    def available(self) -> bool:
+        return sd is not None
+
+    @property
+    def is_recording(self) -> bool:
+        return self._stream is not None
+
+    def start(self, wav_path: Path) -> None:
+        if sd is None:
+            raise RuntimeError("sounddevice is not installed")
+        if self._stream is not None:
+            return
+
+        import wave
+
+        wav_path.parent.mkdir(parents=True, exist_ok=True)
+        self._file_handle = wave.open(str(wav_path), "wb")
+        self._file_handle.setnchannels(self._channels)
+        self._file_handle.setsampwidth(2)
+        self._file_handle.setframerate(self._samplerate)
+
+        def _on_audio(indata: np.ndarray, frames: int, _time_info: Any, _status: Any) -> None:
+            if frames <= 0:
+                return
+            with self._lock:
+                if self._file_handle is not None:
+                    self._file_handle.writeframes(indata.tobytes())
+
+        self._stream = sd.InputStream(
+            samplerate=self._samplerate,
+            channels=self._channels,
+            dtype="int16",
+            callback=_on_audio,
+        )
+        self._stream.start()
+
+    def stop(self) -> None:
+        if self._stream is not None:
+            self._stream.stop()
+            self._stream.close()
+            self._stream = None
+        with self._lock:
+            if self._file_handle is not None:
+                self._file_handle.close()
+                self._file_handle = None
+
+
+class TrialState(Enum):
+    IDLE = "idle"
+    THINKING_COUNTDOWN = "thinking_countdown"
+    THINKING_ACTIVE = "thinking_active"
+    SPEECH_ACTIVE = "speech_active"
+
+
+class AcquisitionService:
+    def __init__(
+        self,
+        *,
+        baudrate: int = DEFAULT_BAUD,
+        test_mode: bool = False,
+        debug_bands: bool = False,
+        boot: Optional[BootSession] = None,
+    ) -> None:
+        self._test_mode = test_mode
+        self._debug_bands = debug_bands
+        self._band_debug_last_print_ns = 0
+        self._boot = boot
+        self._queue: queue.Queue[RxFrame] = queue.Queue(maxsize=20_000)
+        self._z_queue: queue.Queue[ImpedanceWave] = queue.Queue(maxsize=16)
+        self._audio_q: queue.Queue[AudioFrame] = queue.Queue(maxsize=64)
+        self._audio = np.zeros(AUDIO_RATE_HZ * WINDOW_SECONDS, dtype=np.int16)
+        self._audio_w = 0
+        self._audio_seq: int | None = None
+        self._test_audio_t0: float | None = None
+        self._test_audio_n = 0
+        self._speaker_lock = threading.Lock()
+        self._speaker_playing = False
+        self._speaker_sentence: str | None = None
+        self._z_active = False
+        self._z_r: list[float | None] = [None] * len(Z_ELECTRODES)
+        self._z_c: list[float | None] = [None] * len(Z_ELECTRODES)
+        self._z_last_ns: int | None = None
+        self._z_sim_ns = 0
+        self._z_sim_parity = 0
+        if test_mode:
+            self._reader: SerialReader | TestReader | BleReader = TestReader(out_queue=self._queue)
+        elif DATA_LINK == "ble":
+            self._reader = BleReader(
+                out_queue=self._queue,
+                z_queue=self._z_queue,
+                audio_queue=self._audio_q,
+                wrap_frame=lambda frame: RxFrame(frame=frame, host_rx_time_ns=time.perf_counter_ns()),
+            )
+        else:
+            if boot is None:
+                raise ValueError("boot session is required unless test_mode is enabled")
+            self._reader = SerialReader(
+                port=boot.port,
+                baudrate=baudrate,
+                out_queue=self._queue,
+                z_queue=self._z_queue,
+                audio_queue=self._audio_q,
+                boot=boot,
+            )
+        self._reader.start()
+        self._pump_stop = threading.Event()
+
+        self._recorder = SessionRecorder(sample_rate_hz=SAMPLE_RATE_HZ, channel_count=CHANNEL_COUNT)
+        self._subjects = SubjectRegistry(DEFAULT_RECORDINGS_DIR)
+        self._subject: Optional[tuple[str, str]] = None
+        self._aligner = TimeAligner(sample_rate_hz=SAMPLE_RATE_HZ)
+        self._speech_recorder = SpeechAudioRecorder(SPEECH_AUDIO_RATE_HZ, SPEECH_AUDIO_CHANNELS)
+        self._asr_results_queue: queue.Queue[dict[str, Any]] = queue.Queue()
+        self._whisper_model = None
+
+        self._trial_state = TrialState.IDLE
+        self._current_trial_id: Optional[str] = None
+        self._current_trial_word = ""
+        self._speech_block_id: Optional[str] = None
+        self._speech_block_start_sample_float: Optional[float] = None
+        self._speech_audio_path: Optional[Path] = None
+        self._last_session_dir: Optional[Path] = None
+        self._thinking_countdown_deadline_ns: Optional[int] = None
+        self._pending_asr_jobs = 0
+
+        self._collect_phase = "disabled"
+        self._collect_mode = "single"
+        self._collect_word = ""
+        self._collect_rep = 0
+        self._collect_reps_total = COLLECTION_REPETITIONS
+        self._collect_set_idx = 0
+        self._collect_set_total = 0
+        self._collect_prev_word = ""
+        self._collect_block_id: Optional[str] = None
+        self._collect_deadline_ns: Optional[int] = None
+        self._collect_countdown_word_switch = False
+        self._collect_trailing_break = False
+        self._collect_scramble_stop_after_rep = False
+        self._collect_occ_words: list[str] = []
+        self._collect_occ_segment_kind = ""
+        self._collect_occ_still_time_s = 0.0
+        self._collect_occ_collection_word_time_s = 0.0
+        self._collect_occ_segment_started_ns: Optional[int] = None
+        self._collect_word_weights = default_collection_word_weights()
+        self._collect_occ_mix_weights = default_occasional_word_mix_weights()
+        self._collect_negative_word_rate = DEFAULT_NEGATIVE_WORD_RATE
+        self._collect_word_is_off_list = False
+
+        self._align_test_phase = "idle"
+        self._align_test_deadline_ns: Optional[int] = None
+        self._align_test_say_start_idx: Optional[int] = None
+        self._align_test_say_start_float: Optional[float] = None
+        self._align_test_say_end_idx: Optional[int] = None
+        self._align_test_say_end_float: Optional[float] = None
+        self._align_test_method = ""
+        self._align_test_result: Optional[dict[str, Any]] = None
+
+        self._model_test_phase = "idle"
+        self._model_test_deadline_ns: Optional[int] = None
+        self._model_test_trial = 0
+        self._model_test_trials_total = MODEL_TEST_TRIALS
+        self._model_test_captures: list[dict[str, Any]] = []
+        self._model_test_result: Optional[dict[str, Any]] = None
+        self._model_test_say_start_idx: Optional[int] = None
+        self._model_test_say_start_float: Optional[float] = None
+        self._model_test_nn = None
+        self._model_test_label_to_idx: Optional[dict[str, int]] = None
+        self._model_test_idx_to_label: Optional[dict[int, str]] = None
+        self._model_test_checkpoint: Optional[str] = None
+        self._model_test_model_config: Optional[dict[str, Any]] = None
+        self._model_test_device = None
+
+        self._model_use_active = False
+        self._model_use_deadline_ns: Optional[int] = None
+        self._model_use_latest: Optional[dict[str, Any]] = None
+        self._model_use_prediction_count = 0
+
+        self._latest_sample_index = -1
+        self._total_frames = 0
+        self._buffer_samples = FILTER_BUFFER_SECONDS * SAMPLE_RATE_HZ
+        self._display_samples = WINDOW_SECONDS * SAMPLE_RATE_HZ
+        self._buffer_uv = np.zeros((CHANNEL_COUNT, self._buffer_samples), dtype=np.float32)
+        self._write_idx = 0
+        self._rail_history = np.zeros((CHANNEL_COUNT, RAIL_WINDOW_FRAMES), dtype=np.uint8)
+        self._rail_counts = np.zeros(CHANNEL_COUNT, dtype=np.int32)
+        self._rail_history_idx = 0
+        self._rail_history_filled = 0
+        self._lock = threading.Lock()
+        self._shutdown_lock = threading.Lock()
+        self._shutdown_done = False
+
+        self._pump_thread = threading.Thread(target=self._pump, daemon=True)
+        self._pump_thread.start()
+
+    def _pump(self) -> None:
+        while not self._pump_stop.is_set():
+            self._drain_asr_results()
+            self._drain_impedance()
+            self._drain_audio()
+            try:
+                rx_frame = self._queue.get(timeout=0.02 if self._z_active else 0.05)
+            except queue.Empty:
+                self._tick_countdown()
+                self._tick_collect()
+                self._tick_alignment_test()
+                self._tick_model_test()
+                self._tick_model_use()
+                continue
+            self._push_frame(rx_frame)
+            self._tick_countdown()
+            self._tick_collect()
+            self._tick_alignment_test()
+            self._tick_model_test()
+            self._tick_model_use()
+
+        self._drain_audio()
+        while True:
+            try:
+                rx_frame = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            self._push_frame(rx_frame)
+        self._drain_audio()
+
+    def _finalize_recording_on_shutdown(self, reason: str) -> None:
+        if not self._recorder.enabled:
+            return
+        _event_host_ns, aligned_float, aligned_idx, method = self._aligned_sample_now()
+        self._recorder.log_event(
+            event_type="forced_shutdown",
+            sample_index_start=aligned_idx,
+            sample_index_start_float=aligned_float,
+            alignment_method=method,
+            payload={"source": "host", "reason": reason},
+        )
+        session_dir = self._recorder.session_dir
+        self._recorder.stop()
+        self._reset_collect()
+        if session_dir:
+            self._last_session_dir = session_dir
+
+    def shutdown(self, *, recording_shutdown_reason: str = "shutdown") -> None:
+        with self._shutdown_lock:
+            if self._shutdown_done:
+                return
+            self._shutdown_done = True
+
+        if self._z_active:
+            try:
+                self._reader.send_host_cmd(HOST_CMD_Z_OFF)
+            except Exception:
+                pass
+            self._z_active = False
+        self._reader.stop()
+        self._pump_stop.set()
+        self._pump_thread.join(timeout=2.0)
+        self._speech_recorder.stop()
+        if self._recorder.enabled:
+            self._finalize_recording_on_shutdown(recording_shutdown_reason)
+        self._reader.join(timeout=2.0)
+
+    def _aligned_sample_now(self) -> tuple[int, Optional[float], Optional[int], str]:
+        event_host_ns = time.perf_counter_ns()
+        aligned_float = self._aligner.estimate_sample_float(event_host_ns)
+        aligned_idx = self._aligner.quantize_sample_index(aligned_float)
+        method = "host_time_regression" if aligned_float is not None else ""
+        return event_host_ns, aligned_float, aligned_idx, method
+
+    def _push_frame(self, rx_frame: RxFrame) -> None:
+        if self._z_active:
+            return
+        frame = rx_frame.frame
+        uv = frame.channels_uv()
+        railed = (np.abs(frame.channels_i32) >= RAIL_CODE_WARN).astype(np.uint8)
+        with self._lock:
+            self._buffer_uv[:, self._write_idx] = uv
+            self._write_idx = (self._write_idx + 1) % self._buffer_samples
+            self._latest_sample_index = frame.sample_index
+            self._total_frames += 1
+            old = self._rail_history[:, self._rail_history_idx]
+            self._rail_counts += railed.astype(np.int32) - old.astype(np.int32)
+            self._rail_history[:, self._rail_history_idx] = railed
+            self._rail_history_idx = (self._rail_history_idx + 1) % RAIL_WINDOW_FRAMES
+            self._rail_history_filled = min(self._rail_history_filled + 1, RAIL_WINDOW_FRAMES)
+        self._aligner.update(sample_index=frame.sample_index, host_rx_time_ns=rx_frame.host_rx_time_ns)
+        self._recorder.append_frame(frame)
+
+    def _tick_countdown(self) -> None:
+        if self._trial_state != TrialState.THINKING_COUNTDOWN:
+            return
+        deadline = self._thinking_countdown_deadline_ns
+        if deadline is None or time.perf_counter_ns() < deadline:
+            return
+        _event_host_ns, start_float, start_idx, start_method = self._aligned_sample_now()
+        if start_idx is None or not self._current_trial_id:
+            self._trial_state = TrialState.IDLE
+            self._thinking_countdown_deadline_ns = None
+            return
+        self._trial_state = TrialState.THINKING_ACTIVE
+        self._thinking_countdown_deadline_ns = None
+        self._recorder.log_event(
+            event_type="thinking_trial_start",
+            label_text=self._current_trial_word,
+            sample_index_start=start_idx,
+            sample_index_start_float=start_float,
+            alignment_method=start_method,
+            payload={"trial_id": self._current_trial_id},
+        )
+
+    def _rail_warning(self) -> dict[str, Any]:
+        with self._lock:
+            filled = self._rail_history_filled
+            counts = self._rail_counts.copy()
+        if filled == 0:
+            return {"level": "waiting", "text": "Rail warning: waiting for data"}
+        denom = float(filled)
+        rail_pct = (counts.astype(np.float32) / denom) * 100.0
+        flagged = np.where(rail_pct >= RAIL_WARN_PERCENT)[0]
+        if flagged.size == 0:
+            return {"level": "ok", "text": "Rail warning: none"}
+        labels: list[str] = []
+        for idx in flagged[:8]:
+            group = "EEG" if idx < EEG_COUNT else "EMG"
+            ch = (idx + 1) if idx < EEG_COUNT else (idx - EEG_COUNT + 1)
+            labels.append(f"{group}{ch} {rail_pct[idx]:.0f}%")
+        extra = "" if flagged.size <= 8 else f" +{flagged.size - 8} more"
+        return {"level": "warn", "text": "Rail warning: " + ", ".join(labels) + extra}
+
+    def _thinking_countdown_remaining(self) -> Optional[int]:
+        if self._trial_state != TrialState.THINKING_COUNTDOWN:
+            return None
+        deadline = self._thinking_countdown_deadline_ns
+        if deadline is None:
+            return None
+        remaining_s = (deadline - time.perf_counter_ns()) / 1e9
+        return max(0, int(remaining_s + 0.999))
+
+    def _collect_phase_remaining_s(self) -> Optional[float]:
+        if self._collect_phase not in ("countdown", "say", "still"):
+            return None
+        if self._collect_deadline_ns is None:
+            return None
+        return max(0.0, (self._collect_deadline_ns - time.perf_counter_ns()) / 1e9)
+
+    @staticmethod
+    def _is_scramble_mode(mode: str) -> bool:
+        return mode in ("scramble", "scramble-breaks")
+
+    def _countdown_seconds(self, *, new_label: bool, word_switch: bool = False) -> float:
+        if self._collect_mode == "occasional_word" and new_label:
+            return COLLECTION_SAY_S
+        if self._collect_mode == "scramble-breaks":
+            return COLLECTION_SAY_S
+        if not new_label:
+            return COLLECTION_BETWEEN_S
+        if word_switch:
+            return COLLECTION_BEFORE_S
+        return COLLECTION_BEFORE_S
+
+    def _begin_collect_countdown(self, *, new_label: bool, word_switch: bool = False) -> None:
+        self._collect_phase = "countdown"
+        self._collect_countdown_word_switch = word_switch
+        countdown_s = self._countdown_seconds(new_label=new_label, word_switch=word_switch)
+        self._collect_deadline_ns = time.perf_counter_ns() + int(countdown_s * 1_000_000_000)
+
+    def _pick_off_list_word(self) -> str:
+        return random.choice(OCCASIONAL_WORD_POOL)
+
+    def _pick_auto_collection_word(self, *, exclude: Optional[str] = None) -> tuple[str, bool]:
+        rate = clamp_unit_weight(self._collect_negative_word_rate)
+        if rate > 0.0 and random.random() < rate:
+            return self._pick_off_list_word(), True
+        return self._pick_weighted_collection_word(exclude=exclude), False
+
+    def _pick_weighted_collection_word(self, *, exclude: Optional[str] = None) -> str:
+        choices: list[str] = []
+        weights: list[float] = []
+        for word in COLLECTION_WORDS:
+            if exclude is not None and word == exclude:
+                continue
+            weight = clamp_collection_word_weight(self._collect_word_weights.get(word, 0.0))
+            if weight <= 0.0:
+                continue
+            choices.append(word)
+            weights.append(weight)
+        if not choices:
+            fallback = [word for word in COLLECTION_WORDS if word != exclude]
+            if not fallback:
+                fallback = list(COLLECTION_WORDS)
+            return random.choice(fallback)
+        return random.choices(choices, weights=weights, k=1)[0]
+
+    def _pick_scramble_word(self) -> str:
+        word, is_off_list = self._pick_auto_collection_word(exclude=self._collect_prev_word or None)
+        self._collect_word_is_off_list = is_off_list
+        return word
+
+    def set_collect_word_weights(self, weights: dict[str, Any]) -> None:
+        if self._collect_phase not in ("disabled", "pick_word"):
+            raise RuntimeError("Finish the current collection before changing word weights")
+        merged = dict(self._collect_word_weights)
+        for word in COLLECTION_WORDS:
+            if word not in weights:
+                continue
+            merged[word] = clamp_collection_word_weight(weights[word])
+        if active_word_weight_count(merged) < WORD_WEIGHT_MIN_ACTIVE:
+            raise RuntimeError(
+                f"At least {WORD_WEIGHT_MIN_ACTIVE} words must have weight above 0"
+            )
+        for word in COLLECTION_WORDS:
+            if word in weights:
+                self._collect_word_weights[word] = merged[word]
+
+    def set_collect_negative_word_rate(self, rate: float) -> None:
+        if self._collect_phase not in ("disabled", "pick_word"):
+            raise RuntimeError("Finish the current collection before changing negative word rate")
+        self._collect_negative_word_rate = clamp_unit_weight(rate)
+
+    def set_collect_occasional_word_mix(self, weights: dict[str, Any]) -> None:
+        if self._collect_phase not in ("disabled", "pick_word"):
+            raise RuntimeError("Finish the current collection before changing occasional word mix")
+        for key in OCCASIONAL_WORD_MIX_DEFAULT_WEIGHTS:
+            if key not in weights:
+                continue
+            self._collect_occ_mix_weights[key] = clamp_unit_weight(weights[key])
+
+    def _occasional_word_segment_targets(self) -> dict[str, float]:
+        active = {
+            key: clamp_unit_weight(self._collect_occ_mix_weights.get(key, 0.0))
+            for key in OCCASIONAL_WORD_MIX_DEFAULT_WEIGHTS
+        }
+        active = {key: weight for key, weight in active.items() if weight > 0.0}
+        if not active:
+            return {"still": 1.0}
+        total = sum(active.values())
+        return {key: weight / total for key, weight in active.items()}
+
+    def _pick_occasional_word_segment(self) -> str:
+        targets = self._occasional_word_segment_targets()
+        if len(targets) == 1:
+            return "still"
+        elapsed = {
+            "still": self._collect_occ_still_time_s,
+            "collection_word": self._collect_occ_collection_word_time_s,
+        }
+        total_elapsed = sum(elapsed[kind] for kind in targets)
+        if total_elapsed <= 0:
+            roll = random.random()
+            cumulative = 0.0
+            for kind, weight in targets.items():
+                cumulative += weight
+                if roll < cumulative:
+                    return kind
+            return next(reversed(targets))
+
+        deficits = {kind: targets[kind] - (elapsed[kind] / total_elapsed) for kind in targets}
+        weights = {kind: max(deficits[kind], 0.01) for kind in targets}
+        kinds = list(weights.keys())
+        return random.choices(kinds, weights=[weights[kind] for kind in kinds], k=1)[0]
+
+    def _pick_occasional_word_pool(self) -> list[str]:
+        pool = list(OCCASIONAL_WORD_POOL)
+        random.shuffle(pool)
+        return pool[:OCCASIONAL_WORD_WORD_COUNT]
+
+    def _mark_occasional_word_segment_start(self) -> None:
+        self._collect_occ_segment_started_ns = time.perf_counter_ns()
+
+    def _record_occasional_word_segment_elapsed(self, segment_kind: str) -> None:
+        started_ns = self._collect_occ_segment_started_ns
+        if started_ns is None:
+            return
+        elapsed_s = max(0.0, (time.perf_counter_ns() - started_ns) / 1e9)
+        self._collect_occ_segment_started_ns = None
+        if segment_kind == "still":
+            self._collect_occ_still_time_s += elapsed_s
+        elif segment_kind == "collection_word":
+            self._collect_occ_collection_word_time_s += elapsed_s
+
+    def _begin_occasional_word_still(self) -> None:
+        duration_s = random.uniform(OCCASIONAL_WORD_STILL_MIN_S, OCCASIONAL_WORD_STILL_MAX_S)
+        self._collect_occ_segment_kind = "still"
+        self._collect_word = ""
+        self._collect_word_is_off_list = False
+        self._collect_phase = "still"
+        self._collect_deadline_ns = time.perf_counter_ns() + int(duration_s * 1_000_000_000)
+        self._mark_occasional_word_segment_start()
+
+    def _begin_occasional_word_word_segment(self) -> None:
+        word, is_off_list = self._pick_auto_collection_word()
+        self._collect_word = word
+        self._collect_word_is_off_list = is_off_list
+        self._collect_occ_segment_kind = "collection_word"
+        self._collect_rep = 1
+        self._collect_reps_total = 1
+        self._begin_collect_countdown(new_label=True)
+        self._mark_occasional_word_segment_start()
+
+    def _begin_occasional_word_segment(self) -> None:
+        segment_kind = self._pick_occasional_word_segment()
+        if segment_kind == "still":
+            self._begin_occasional_word_still()
+        else:
+            self._begin_occasional_word_word_segment()
+
+    def _collect_status(self) -> dict[str, Any]:
+        busy = self._collect_phase in ("countdown", "say", "still")
+        occasional_word_active = self._collect_mode == "occasional_word" and busy
+        return {
+            "phase": self._collect_phase,
+            "mode": self._collect_mode if busy else None,
+            "word": self._collect_word or None,
+            "repetition": self._collect_rep if busy else None,
+            "repetitions_total": self._collect_reps_total if busy else COLLECTION_REPETITIONS,
+            "set_index": self._collect_set_idx if busy and self._is_scramble_mode(self._collect_mode) else None,
+            "sets_total": self._collect_set_total if busy and self._is_scramble_mode(self._collect_mode) else None,
+            "occ_segment_kind": self._collect_occ_segment_kind if occasional_word_active else None,
+            "word_is_off_list": self._collect_word_is_off_list if busy and self._collect_word else False,
+            "occasional_word_active": occasional_word_active,
+            "phase_remaining_s": self._collect_phase_remaining_s(),
+            "words": list(COLLECTION_WORDS),
+            "before_s": COLLECTION_BEFORE_S,
+            "between_s": COLLECTION_BETWEEN_S,
+            "word_switch_s": COLLECTION_BEFORE_S,
+            "say_s": COLLECTION_SAY_S,
+            "word_switch": self._collect_countdown_word_switch if self._collect_phase == "countdown" else False,
+            "trailing_break": self._collect_trailing_break if self._collect_phase == "countdown" else False,
+            "scramble_stop_pending": self._collect_scramble_stop_after_rep
+            if busy and self._is_scramble_mode(self._collect_mode)
+            else False,
+            "default_scramble_set": DEFAULT_SCRAMBLE_SET,
+            "default_scramble_rep": DEFAULT_SCRAMBLE_REP,
+            "default_single_repetitions": COLLECTION_REPETITIONS,
+            "scramble_set_min": SCRAMBLE_SET_MIN,
+            "scramble_set_max": SCRAMBLE_SET_MAX,
+            "scramble_rep_min": SCRAMBLE_REP_MIN,
+            "scramble_rep_max": SCRAMBLE_REP_MAX,
+            "single_rep_min": SCRAMBLE_REP_MIN,
+            "single_rep_max": SCRAMBLE_REP_MAX,
+            "word_weights": dict(self._collect_word_weights),
+            "default_word_weights": default_collection_word_weights(),
+            "word_weight_min": WORD_WEIGHT_MIN,
+            "word_weight_max": WORD_WEIGHT_MAX,
+            "word_weight_step": WORD_WEIGHT_STEP,
+            "word_weight_min_active": WORD_WEIGHT_MIN_ACTIVE,
+            "word_weights_valid": active_word_weight_count(self._collect_word_weights)
+            >= WORD_WEIGHT_MIN_ACTIVE,
+            "negative_word_rate": self._collect_negative_word_rate,
+            "default_negative_word_rate": DEFAULT_NEGATIVE_WORD_RATE,
+            "occ_mix_weights": dict(self._collect_occ_mix_weights),
+            "default_occ_mix_weights": default_occasional_word_mix_weights(),
+            "occ_mix_labels": dict(OCCASIONAL_WORD_MIX_LABELS),
+            "occ_mix_keys": list(OCCASIONAL_WORD_MIX_DEFAULT_WEIGHTS.keys()),
+        }
+
+    def _reset_collect(self) -> None:
+        self._collect_phase = "disabled"
+        self._collect_mode = "single"
+        self._collect_word = ""
+        self._collect_rep = 0
+        self._collect_reps_total = COLLECTION_REPETITIONS
+        self._collect_set_idx = 0
+        self._collect_set_total = 0
+        self._collect_prev_word = ""
+        self._collect_block_id = None
+        self._collect_deadline_ns = None
+        self._collect_countdown_word_switch = False
+        self._collect_trailing_break = False
+        self._collect_scramble_stop_after_rep = False
+        self._collect_occ_words = []
+        self._collect_occ_segment_kind = ""
+        self._collect_occ_still_time_s = 0.0
+        self._collect_occ_collection_word_time_s = 0.0
+        self._collect_occ_segment_started_ns = None
+        self._collect_word_is_off_list = False
+
+    def _finish_collect_block(self) -> None:
+        finished_word = self._collect_word
+        finished_block = self._collect_block_id
+        finished_mode = self._collect_mode
+        self._collect_phase = "pick_word"
+        self._collect_word = ""
+        self._collect_rep = 0
+        self._collect_reps_total = COLLECTION_REPETITIONS
+        self._collect_set_idx = 0
+        self._collect_set_total = 0
+        self._collect_prev_word = ""
+        self._collect_block_id = None
+        self._collect_deadline_ns = None
+        self._collect_countdown_word_switch = False
+        self._collect_trailing_break = False
+        self._collect_scramble_stop_after_rep = False
+        self._collect_mode = "single"
+        if finished_block and self._recorder.enabled:
+            _event_host_ns, aligned_float, aligned_idx, method = self._aligned_sample_now()
+            if aligned_idx is not None:
+                self._recorder.log_event(
+                    event_type="silent_speech_block_end",
+                    label_text=finished_word,
+                    sample_index_start=aligned_idx,
+                    sample_index_start_float=aligned_float,
+                    alignment_method=method,
+                    payload={
+                        "collection_block_id": finished_block,
+                        "word": finished_word,
+                        "mode": finished_mode,
+                    },
+                )
+
+    def _tick_collect(self) -> None:
+        if self._collect_phase not in ("countdown", "say", "still"):
+            return
+        deadline = self._collect_deadline_ns
+        if deadline is None or time.perf_counter_ns() < deadline:
+            return
+
+        if self._collect_phase == "still":
+            self._record_occasional_word_segment_elapsed("still")
+            if self._collect_mode == "occasional_word":
+                self._begin_occasional_word_segment()
+            return
+
+        if self._collect_phase == "countdown":
+            if self._collect_trailing_break:
+                self._collect_trailing_break = False
+                self._finish_collect_block()
+                return
+            self._collect_phase = "say"
+            self._collect_countdown_word_switch = False
+            self._collect_deadline_ns = time.perf_counter_ns() + int(COLLECTION_SAY_S * 1_000_000_000)
+            self._log_silent_speech_rep()
+            return
+
+        if self._collect_mode == "occasional_word":
+            self._record_occasional_word_segment_elapsed(self._collect_occ_segment_kind)
+            self._begin_occasional_word_segment()
+            return
+
+        if self._is_scramble_mode(self._collect_mode) and self._collect_scramble_stop_after_rep:
+            self._finish_collect_block()
+            return
+
+        if self._collect_rep < self._collect_reps_total:
+            self._collect_rep += 1
+            self._begin_collect_countdown(new_label=False)
+            return
+
+        self._collect_prev_word = self._collect_word
+        if self._is_scramble_mode(self._collect_mode) and self._collect_set_idx < self._collect_set_total:
+            self._collect_set_idx += 1
+            self._collect_word = self._pick_scramble_word()
+            self._collect_rep = 1
+            self._begin_collect_countdown(new_label=True, word_switch=True)
+            self._log_scramble_word()
+            return
+
+        if self._collect_mode == "scramble-breaks" and not self._collect_trailing_break:
+            self._collect_trailing_break = True
+            self._begin_collect_countdown(new_label=False)
+            return
+
+        self._finish_collect_block()
+
+    def _log_silent_speech_rep(self) -> None:
+        if not self._recorder.enabled or not self._collect_block_id:
+            return
+        _event_host_ns, aligned_float, aligned_idx, method = self._aligned_sample_now()
+        if aligned_idx is None:
+            return
+        end_idx, end_float = say_window_sample_end(aligned_idx, aligned_float)
+        self._recorder.log_event(
+            event_type="silent_speech_word",
+            label_text=self._collect_word,
+            sample_index_start=aligned_idx,
+            sample_index_start_float=aligned_float,
+            sample_index_end=end_idx,
+            sample_index_end_float=end_float,
+            alignment_method=method,
+            payload={
+                "collection_block_id": self._collect_block_id,
+                "repetition": self._collect_rep,
+                "word": self._collect_word,
+                "mode": self._collect_mode,
+                "is_off_list": self._collect_word_is_off_list,
+                "set_index": self._collect_set_idx if self._is_scramble_mode(self._collect_mode) else None,
+                "sets_total": self._collect_set_total if self._is_scramble_mode(self._collect_mode) else None,
+            },
+        )
+
+    def _log_scramble_word(self) -> None:
+        if not self._recorder.enabled or not self._collect_block_id:
+            return
+        _event_host_ns, aligned_float, aligned_idx, method = self._aligned_sample_now()
+        if aligned_idx is None:
+            return
+        self._recorder.log_event(
+            event_type="silent_speech_scramble_word",
+            label_text=self._collect_word,
+            sample_index_start=aligned_idx,
+            sample_index_start_float=aligned_float,
+            alignment_method=method,
+            payload={
+                "collection_block_id": self._collect_block_id,
+                "word": self._collect_word,
+                "set_index": self._collect_set_idx,
+                "sets_total": self._collect_set_total,
+                "repetitions_planned": self._collect_reps_total,
+            },
+        )
+
+    def start_collect_word(self, word: str, repetitions: int = COLLECTION_REPETITIONS) -> None:
+        if not self._recorder.enabled:
+            raise RuntimeError("Start session recording first")
+        if self._collect_phase != "pick_word":
+            raise RuntimeError("Finish the current collection before choosing another")
+        if self._trial_state != TrialState.IDLE:
+            raise RuntimeError("Another trial is already active")
+        if not SCRAMBLE_REP_MIN <= repetitions <= SCRAMBLE_REP_MAX:
+            raise RuntimeError(f"rep must be between {SCRAMBLE_REP_MIN} and {SCRAMBLE_REP_MAX}")
+        word = word.strip().lower()
+        if word not in COLLECTION_WORDS:
+            raise RuntimeError(f"Word must be one of: {', '.join(COLLECTION_WORDS)}")
+        _event_host_ns, aligned_float, aligned_idx, method = self._aligned_sample_now()
+        if aligned_idx is None:
+            raise RuntimeError("No samples yet; cannot start collection")
+
+        block_id = uuid.uuid4().hex
+        self._collect_block_id = block_id
+        self._collect_mode = "single"
+        self._collect_reps_total = repetitions
+        self._collect_set_idx = 0
+        self._collect_set_total = 0
+        self._collect_prev_word = ""
+        self._collect_word = word
+        self._collect_rep = 1
+        self._collect_word_is_off_list = False
+        self._begin_collect_countdown(new_label=True)
+        self._recorder.log_event(
+            event_type="silent_speech_block_start",
+            label_text=word,
+            sample_index_start=aligned_idx,
+            sample_index_start_float=aligned_float,
+            alignment_method=method,
+            payload={
+                "collection_block_id": block_id,
+                "word": word,
+                "mode": "single",
+                "repetitions_planned": repetitions,
+            },
+        )
+
+    def _start_collect_scramble(self, set_count: int, rep_count: int, *, mode: str) -> None:
+        if not self._recorder.enabled:
+            raise RuntimeError("Start session recording first")
+        if self._collect_phase != "pick_word":
+            raise RuntimeError("Finish the current collection before starting another")
+        if self._trial_state != TrialState.IDLE:
+            raise RuntimeError("Another trial is already active")
+        if not SCRAMBLE_SET_MIN <= set_count <= SCRAMBLE_SET_MAX:
+            raise RuntimeError(f"set must be between {SCRAMBLE_SET_MIN} and {SCRAMBLE_SET_MAX}")
+        if not SCRAMBLE_REP_MIN <= rep_count <= SCRAMBLE_REP_MAX:
+            raise RuntimeError(f"rep must be between {SCRAMBLE_REP_MIN} and {SCRAMBLE_REP_MAX}")
+        if active_word_weight_count(self._collect_word_weights) < WORD_WEIGHT_MIN_ACTIVE:
+            raise RuntimeError(
+                f"At least {WORD_WEIGHT_MIN_ACTIVE} words must have weight above 0 before scrambling"
+            )
+        _event_host_ns, aligned_float, aligned_idx, method = self._aligned_sample_now()
+        if aligned_idx is None:
+            raise RuntimeError("No samples yet; cannot start collection")
+
+        block_id = uuid.uuid4().hex
+        self._collect_prev_word = ""
+        word = self._pick_scramble_word()
+        self._collect_block_id = block_id
+        self._collect_mode = mode
+        self._collect_reps_total = rep_count
+        self._collect_set_total = set_count
+        self._collect_set_idx = 1
+        self._collect_word = word
+        self._collect_rep = 1
+        self._collect_scramble_stop_after_rep = False
+        self._begin_collect_countdown(new_label=True)
+        self._recorder.log_event(
+            event_type="silent_speech_scramble_start",
+            label_text=word,
+            sample_index_start=aligned_idx,
+            sample_index_start_float=aligned_float,
+            alignment_method=method,
+            payload={
+                "collection_block_id": block_id,
+                "word": word,
+                "mode": mode,
+                "sets_planned": set_count,
+                "repetitions_per_set": rep_count,
+                "word_weights": dict(self._collect_word_weights),
+                "negative_word_rate": self._collect_negative_word_rate,
+            },
+        )
+        self._log_scramble_word()
+
+    def start_collect_scramble(self, set_count: int, rep_count: int) -> None:
+        self._start_collect_scramble(set_count, rep_count, mode="scramble")
+
+    def start_collect_scramble_breaks(self, set_count: int, rep_count: int) -> None:
+        self._start_collect_scramble(set_count, rep_count, mode="scramble-breaks")
+
+    def stop_collect_scramble_next_chance(self) -> None:
+        if not self._is_scramble_mode(self._collect_mode):
+            raise RuntimeError("Scramble mode is not active")
+        if self._collect_phase not in ("countdown", "say", "still"):
+            raise RuntimeError("Scramble mode is not active")
+        self._collect_scramble_stop_after_rep = True
+
+    def start_collect_occasional_word(self) -> None:
+        if not self._recorder.enabled:
+            raise RuntimeError("Start session recording first")
+        if self._collect_phase != "pick_word":
+            raise RuntimeError("Finish the current collection before starting another")
+        if self._trial_state != TrialState.IDLE:
+            raise RuntimeError("Another trial is already active")
+        _event_host_ns, aligned_float, aligned_idx, method = self._aligned_sample_now()
+        if aligned_idx is None:
+            raise RuntimeError("No samples yet; cannot start collection")
+
+        block_id = uuid.uuid4().hex
+        self._collect_block_id = block_id
+        self._collect_mode = "occasional_word"
+        self._collect_occ_words = self._pick_occasional_word_pool()
+        self._collect_occ_segment_kind = ""
+        self._collect_occ_still_time_s = 0.0
+        self._collect_occ_collection_word_time_s = 0.0
+        self._collect_occ_segment_started_ns = None
+        self._collect_word_is_off_list = False
+        self._recorder.log_event(
+            event_type="silent_speech_block_start",
+            label_text="",
+            sample_index_start=aligned_idx,
+            sample_index_start_float=aligned_float,
+            alignment_method=method,
+            payload={
+                "collection_block_id": block_id,
+                "mode": "occasional_word",
+                "off_list_words": list(self._collect_occ_words),
+                "occ_mix_weights": dict(self._collect_occ_mix_weights),
+                "word_weights": dict(self._collect_word_weights),
+                "negative_word_rate": self._collect_negative_word_rate,
+            },
+        )
+        self._begin_occasional_word_segment()
+
+    def stop_collect_occasional_word(self) -> None:
+        if self._collect_mode != "occasional_word":
+            raise RuntimeError("Occasional word mode is not active")
+        if self._collect_phase == "still":
+            self._record_occasional_word_segment_elapsed("still")
+        elif self._collect_phase == "say" and self._collect_occ_segment_kind == "collection_word":
+            self._record_occasional_word_segment_elapsed("collection_word")
+        block_id = self._collect_block_id
+        _event_host_ns, aligned_float, aligned_idx, method = self._aligned_sample_now()
+        if aligned_idx is not None and block_id and self._recorder.enabled:
+            self._recorder.log_event(
+                event_type="silent_speech_block_end",
+                label_text="",
+                sample_index_start=aligned_idx,
+                sample_index_start_float=aligned_float,
+                alignment_method=method,
+                payload={
+                    "collection_block_id": block_id,
+                    "mode": "occasional_word",
+                },
+            )
+        self._collect_phase = "pick_word"
+        self._collect_mode = "single"
+        self._collect_word = ""
+        self._collect_rep = 0
+        self._collect_reps_total = COLLECTION_REPETITIONS
+        self._collect_set_idx = 0
+        self._collect_set_total = 0
+        self._collect_prev_word = ""
+        self._collect_block_id = None
+        self._collect_deadline_ns = None
+        self._collect_countdown_word_switch = False
+        self._collect_trailing_break = False
+        self._collect_occ_words = []
+        self._collect_occ_segment_kind = ""
+        self._collect_occ_still_time_s = 0.0
+        self._collect_occ_collection_word_time_s = 0.0
+        self._collect_occ_segment_started_ns = None
+        self._collect_word_is_off_list = False
+
+    def toggle_collect_occasional_word(self) -> None:
+        if self._collect_mode == "occasional_word":
+            self.stop_collect_occasional_word()
+        else:
+            self.start_collect_occasional_word()
+
+    def _alignment_test_busy(self) -> bool:
+        return self._align_test_phase in ("countdown", "blink")
+
+    def _reset_alignment_test(self) -> None:
+        self._align_test_phase = "idle"
+        self._align_test_deadline_ns = None
+        self._align_test_say_start_idx = None
+        self._align_test_say_start_float = None
+        self._align_test_say_end_idx = None
+        self._align_test_say_end_float = None
+        self._align_test_method = ""
+        self._align_test_result = None
+
+    def _alignment_test_phase_remaining_s(self) -> Optional[float]:
+        if self._align_test_phase not in ("countdown", "blink"):
+            return None
+        if self._align_test_deadline_ns is None:
+            return None
+        return max(0.0, (self._align_test_deadline_ns - time.perf_counter_ns()) / 1e9)
+
+    def _alignment_test_status(self) -> dict[str, Any]:
+        return {
+            "phase": self._align_test_phase,
+            "phase_remaining_s": self._alignment_test_phase_remaining_s(),
+            "before_s": COLLECTION_BEFORE_S,
+            "say_s": COLLECTION_SAY_S,
+            "has_result": self._align_test_result is not None,
+        }
+
+    def _extract_samples_by_index_range(
+        self,
+        start_idx: int,
+        end_idx: int,
+    ) -> Optional[tuple[np.ndarray, int]]:
+        with self._lock:
+            latest = self._latest_sample_index
+            filled = min(self._total_frames, self._buffer_samples)
+            if filled <= 0 or latest < 0:
+                return None
+            oldest_idx = latest - filled + 1
+            if end_idx < oldest_idx or start_idx > latest:
+                return None
+            clip_start = max(start_idx, oldest_idx)
+            clip_end = min(end_idx, latest)
+            view = _ordered_buffer_view(self._buffer_uv, self._write_idx)
+            i0 = clip_start - oldest_idx
+            i1 = clip_end - oldest_idx + 1
+            return view[:, i0:i1].copy(), clip_start
+
+    def _build_alignment_test_result(self) -> dict[str, Any]:
+        if self._align_test_say_start_float is None or self._align_test_say_start_idx is None:
+            return {"error": "alignment test missing label start"}
+
+        say_start_f = float(self._align_test_say_start_float)
+        say_start_i = int(self._align_test_say_start_idx)
+        say_end_f = say_start_f + COLLECTION_SAY_S * SAMPLE_RATE_HZ
+        say_end_i = TimeAligner.quantize_sample_index(say_end_f) or int(round(say_end_f))
+
+        pad_samples = int(round(ALIGNMENT_TEST_PAD_S * SAMPLE_RATE_HZ))
+        display_start = say_start_i - pad_samples
+        display_end = say_end_i + pad_samples
+        extracted = self._extract_samples_by_index_range(display_start, display_end)
+        if extracted is None:
+            return {
+                "error": "labeled window is no longer in the ring buffer",
+                "sample_index_start": say_start_i,
+                "sample_index_end": say_end_i,
+                "sample_index_start_float": say_start_f,
+                "sample_index_end_float": say_end_f,
+                "alignment_method": self._align_test_method,
+            }
+
+        raw, clip_start = extracted
+        filtered = _preprocess_monitor_window(raw, SAMPLE_RATE_HZ)
+        n = int(raw.shape[1])
+        # Seconds ago relative to the newest sample in the clip (0 = now), same as live waveform plots.
+        time_s = (np.arange(n, dtype=np.float32) + (clip_start - display_end)) / SAMPLE_RATE_HZ
+        label_t0_s = (say_start_i - display_end) / SAMPLE_RATE_HZ
+        label_t1_s = (say_end_i - display_end) / SAMPLE_RATE_HZ
+
+        step = max(1, n // PLOT_POINTS)
+        time_ds = time_s[::step]
+        traces: list[dict[str, Any]] = []
+        for channel_idx in ALIGNMENT_TEST_DISPLAY_CHANNELS:
+            traces.append(
+                {
+                    "index": channel_idx,
+                    "name": channel_name(channel_idx),
+                    "y": raw[channel_idx, ::step].astype(np.float32).tolist(),
+                    "y_filtered": filtered[channel_idx, ::step].astype(np.float32).tolist(),
+                }
+            )
+
+        return {
+            "sample_index_start": say_start_i,
+            "sample_index_end": say_end_i,
+            "sample_index_start_float": say_start_f,
+            "sample_index_end_float": say_end_f,
+            "alignment_method": self._align_test_method,
+            "label_t0_s": float(label_t0_s),
+            "label_t1_s": float(label_t1_s),
+            "time_s": time_ds.astype(np.float32).tolist(),
+            "traces": traces,
+            "before_s": COLLECTION_BEFORE_S,
+            "say_s": COLLECTION_SAY_S,
+            "pad_s": ALIGNMENT_TEST_PAD_S,
+        }
+
+    def _tick_alignment_test(self) -> None:
+        if self._align_test_phase not in ("countdown", "blink"):
+            return
+        deadline = self._align_test_deadline_ns
+        if deadline is None or time.perf_counter_ns() < deadline:
+            return
+
+        if self._align_test_phase == "countdown":
+            _event_host_ns, start_float, start_idx, method = self._aligned_sample_now()
+            if start_idx is None:
+                self._reset_alignment_test()
+                return
+            self._align_test_say_start_float = start_float
+            self._align_test_say_start_idx = start_idx
+            self._align_test_method = method
+            self._align_test_phase = "blink"
+            self._align_test_deadline_ns = time.perf_counter_ns() + int(COLLECTION_SAY_S * 1_000_000_000)
+            return
+
+        _event_host_ns, end_float, end_idx, method = self._aligned_sample_now()
+        if end_idx is not None:
+            self._align_test_say_end_float = end_float
+            self._align_test_say_end_idx = end_idx
+            if method:
+                self._align_test_method = method
+        self._align_test_deadline_ns = None
+        self._align_test_phase = "result"
+        self._align_test_result = self._build_alignment_test_result()
+
+    def start_alignment_test(self) -> None:
+        if self._z_active:
+            raise RuntimeError("Stop impedance measurement first")
+        if self._recorder.enabled:
+            raise RuntimeError("Stop session recording before running alignment test")
+        if self._trial_state != TrialState.IDLE:
+            raise RuntimeError("Finish the active trial before running alignment test")
+        if self._collect_phase not in ("disabled", "pick_word"):
+            raise RuntimeError("Finish collection before running alignment test")
+        if self._alignment_test_busy():
+            raise RuntimeError("Alignment test already running")
+        if self._model_test_busy():
+            raise RuntimeError("Finish model test before running alignment test")
+        _event_host_ns, aligned_float, aligned_idx, method = self._aligned_sample_now()
+        if aligned_idx is None:
+            raise RuntimeError("No samples yet; wait for EEG stream")
+
+        self._align_test_result = None
+        self._align_test_say_start_idx = None
+        self._align_test_say_start_float = None
+        self._align_test_say_end_idx = None
+        self._align_test_say_end_float = None
+        self._align_test_method = method
+        self._align_test_phase = "countdown"
+        self._align_test_deadline_ns = time.perf_counter_ns() + int(COLLECTION_BEFORE_S * 1_000_000_000)
+
+    def clear_alignment_test(self) -> None:
+        self._reset_alignment_test()
+
+    def alignment_test_result(self) -> dict[str, Any]:
+        if self._align_test_phase != "result" or self._align_test_result is None:
+            raise RuntimeError("No alignment test result available")
+        return self._align_test_result
+
+    def _model_test_busy(self) -> bool:
+        return self._model_test_phase in ("countdown", "say")
+
+    def _reset_model_test(self) -> None:
+        self._model_test_phase = "idle"
+        self._model_test_deadline_ns = None
+        self._model_test_trial = 0
+        self._model_test_captures = []
+        self._model_test_result = None
+        self._model_test_say_start_idx = None
+        self._model_test_say_start_float = None
+
+    def _model_test_phase_remaining_s(self) -> Optional[float]:
+        if self._model_test_phase not in ("countdown", "say"):
+            return None
+        if self._model_test_deadline_ns is None:
+            return None
+        return max(0.0, (self._model_test_deadline_ns - time.perf_counter_ns()) / 1e9)
+
+    def _model_test_status(self) -> dict[str, Any]:
+        return {
+            "phase": self._model_test_phase,
+            "trial": self._model_test_trial if self._model_test_busy() else None,
+            "trials_total": self._model_test_trials_total,
+            "phase_remaining_s": self._model_test_phase_remaining_s(),
+            "before_s": COLLECTION_BEFORE_S,
+            "say_s": COLLECTION_SAY_S,
+            "has_result": self._model_test_result is not None,
+            "checkpoint": self._model_test_checkpoint,
+        }
+
+    def _extract_training_aligned_window(self, start_idx: int, end_idx: int) -> Optional[np.ndarray]:
+        """Filter the full ring buffer, then crop the event span — same order as data.build_event_windows."""
+        if self._model_test_model_config is None:
+            return None
+        target_len = int(self._model_test_model_config["T"])
+        with self._lock:
+            latest = self._latest_sample_index
+            filled = min(self._total_frames, self._buffer_samples)
+            if filled <= 0 or latest < 0:
+                return None
+            oldest_idx = latest - filled + 1
+            if end_idx < oldest_idx or start_idx > latest:
+                return None
+            view = _ordered_buffer_view(self._buffer_uv, self._write_idx)
+
+        block_tc = np.asarray(view.T, dtype=np.float32)
+        filtered_tc = preprocess_session_channels(
+            block_tc,
+            float(SAMPLE_RATE_HZ),
+            line_noise=DEFAULT_LINE_NOISE_CONFIG,
+            eeg=DEFAULT_EEG_BANDPASS_CONFIG,
+            emg=DEFAULT_EMG_BANDPASS_CONFIG,
+        )
+        i0 = max(0, start_idx - oldest_idx)
+        i1 = min(filled, end_idx - oldest_idx + 1)
+        if i1 <= i0:
+            return None
+        return fix_window_length(filtered_tc[i0:i1, :], target_len)
+
+    def _fusion_channel_indices(self) -> tuple[Optional[list[int]], Optional[list[int]]]:
+        cfg = self._model_test_model_config or {}
+        eeg = cfg.get("active_eeg_indices")
+        emg = cfg.get("active_emg_indices")
+        return (
+            [int(i) for i in eeg] if eeg is not None else None,
+            [int(i) for i in emg] if emg is not None else None,
+        )
+
+    def _load_model_for_test(self) -> None:
+        if self._model_test_nn is not None:
+            return
+        if torch is None:
+            raise RuntimeError("PyTorch is not installed")
+
+        path = default_checkpoint_path("best")
+        if not path.exists():
+            raise RuntimeError(f"No checkpoint found at {path}")
+        device = get_device()
+        model, label_to_idx, meta = load_checkpoint(path, device)
+        self._model_test_nn = model
+        self._model_test_label_to_idx = label_to_idx
+        self._model_test_idx_to_label = {idx: label for label, idx in label_to_idx.items()}
+        self._model_test_checkpoint = str(path.resolve())
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+        self._model_test_model_config = dict(ckpt["model_config"])
+        self._model_test_device = device
+
+    def _capture_model_test_window(self) -> dict[str, Any]:
+        trial = self._model_test_trial
+        if self._model_test_say_start_idx is None or self._model_test_say_start_float is None:
+            return {"trial": trial, "error": "missing say window start"}
+
+        say_start_i = int(self._model_test_say_start_idx)
+        say_start_f = float(self._model_test_say_start_float)
+        say_end_f = say_start_f + COLLECTION_SAY_S * SAMPLE_RATE_HZ
+        say_end_i = TimeAligner.quantize_sample_index(say_end_f) or int(round(say_end_f))
+        window_tc = self._extract_training_aligned_window(say_start_i, say_end_i)
+        if window_tc is None:
+            return {
+                "trial": trial,
+                "error": "labeled window is no longer in the ring buffer",
+                "sample_index_start": say_start_i,
+                "sample_index_end": say_end_i,
+            }
+
+        return {
+            "trial": trial,
+            "sample_index_start": say_start_i,
+            "sample_index_end": say_end_i,
+            "window_tc": window_tc,
+            "window_len": int(window_tc.shape[0]),
+        }
+
+    def _predict_model_test_batch(self, captures: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if self._model_test_nn is None:
+            raise RuntimeError("Model not loaded")
+        idx_to_label = self._model_test_idx_to_label or {}
+
+        trial_rows: list[dict[str, Any]] = []
+        windows_tc: list[np.ndarray] = []
+        batch_row_indices: list[int] = []
+
+        for capture in captures:
+            row: dict[str, Any] = {
+                "trial": capture.get("trial"),
+                "sample_index_start": capture.get("sample_index_start"),
+                "sample_index_end": capture.get("sample_index_end"),
+                "window_len": capture.get("window_len"),
+            }
+            if capture.get("error"):
+                row["error"] = capture["error"]
+                trial_rows.append(row)
+                continue
+            window_tc = capture.get("window_tc")
+            if window_tc is None:
+                row["error"] = "missing window"
+                trial_rows.append(row)
+                continue
+            batch_row_indices.append(len(trial_rows))
+            trial_rows.append(row)
+            windows_tc.append(np.asarray(window_tc, dtype=np.float32))
+
+        if windows_tc:
+            eeg_indices, emg_indices = self._fusion_channel_indices()
+            preds = predict_fusion_batch(
+                self._model_test_nn,
+                windows_tc,
+                device=self._model_test_device,
+                idx_to_label=idx_to_label,
+                eeg_indices=eeg_indices,
+                emg_indices=emg_indices,
+            )
+            for batch_idx, row_idx in enumerate(batch_row_indices):
+                pred = preds[batch_idx]
+                trial_rows[row_idx].update(pred)
+                labeled_probs = {
+                    idx_to_label[i]: round(float(pred["probs"][i]), 4)
+                    for i in range(len(pred["probs"]))
+                }
+                print(
+                    f"[model-test] trial {trial_rows[row_idx]['trial']}: "
+                    f"logits={[round(v, 4) for v in pred['logits']]} "
+                    f"probs={labeled_probs} "
+                    f"pred={pred['predicted_label']} ({pred['predicted_probability']:.4f})",
+                    flush=True,
+                )
+
+        return trial_rows
+
+    def _finalize_model_test(self) -> None:
+        try:
+            trial_results = self._predict_model_test_batch(self._model_test_captures)
+        except Exception as exc:  # pylint: disable=broad-except
+            trial_results = [
+                {
+                    "trial": capture.get("trial"),
+                    "sample_index_start": capture.get("sample_index_start"),
+                    "sample_index_end": capture.get("sample_index_end"),
+                    "error": str(exc),
+                }
+                for capture in self._model_test_captures
+            ]
+
+        label_order = (
+            sorted(self._model_test_label_to_idx.keys())
+            if self._model_test_label_to_idx
+            else []
+        )
+        self._model_test_result = {
+            "checkpoint": self._model_test_checkpoint,
+            "trials_total": self._model_test_trials_total,
+            "label_order": label_order,
+            "trials": trial_results,
+        }
+        self._model_test_captures = []
+        self._model_test_phase = "result"
+
+    def _tick_model_test(self) -> None:
+        if self._model_test_phase not in ("countdown", "say"):
+            return
+        deadline = self._model_test_deadline_ns
+        if deadline is None or time.perf_counter_ns() < deadline:
+            return
+
+        if self._model_test_phase == "countdown":
+            _event_host_ns, start_float, start_idx, _method = self._aligned_sample_now()
+            if start_idx is None:
+                self._reset_model_test()
+                return
+            self._model_test_say_start_float = start_float
+            self._model_test_say_start_idx = start_idx
+            self._model_test_phase = "say"
+            self._model_test_deadline_ns = time.perf_counter_ns() + int(COLLECTION_SAY_S * 1_000_000_000)
+            return
+
+        capture = self._capture_model_test_window()
+        self._model_test_captures.append(capture)
+        self._model_test_say_start_idx = None
+        self._model_test_say_start_float = None
+
+        if self._model_test_trial < self._model_test_trials_total:
+            self._model_test_trial += 1
+            self._model_test_phase = "countdown"
+            self._model_test_deadline_ns = time.perf_counter_ns() + int(COLLECTION_BEFORE_S * 1_000_000_000)
+            return
+
+        self._model_test_deadline_ns = None
+        self._finalize_model_test()
+
+    def start_model_test(self) -> None:
+        if self._z_active:
+            raise RuntimeError("Stop impedance measurement first")
+        if self._recorder.enabled:
+            raise RuntimeError("Stop session recording before running model test")
+        if self._trial_state != TrialState.IDLE:
+            raise RuntimeError("Finish the active trial before running model test")
+        if self._collect_phase not in ("disabled", "pick_word"):
+            raise RuntimeError("Finish collection before running model test")
+        if self._alignment_test_busy():
+            raise RuntimeError("Finish alignment test before running model test")
+        if self._model_test_busy():
+            raise RuntimeError("Model test already running")
+        if self._model_use_active:
+            raise RuntimeError("Stop model usage before running model test")
+        _event_host_ns, aligned_float, aligned_idx, _method = self._aligned_sample_now()
+        if aligned_idx is None:
+            raise RuntimeError("No samples yet; wait for EEG stream")
+
+        self._load_model_for_test()
+        self._reset_model_test()
+        self._model_test_trials_total = MODEL_TEST_TRIALS
+        self._model_test_trial = 1
+        self._model_test_phase = "countdown"
+        self._model_test_deadline_ns = time.perf_counter_ns() + int(COLLECTION_BEFORE_S * 1_000_000_000)
+
+    def clear_model_test(self) -> None:
+        self._reset_model_test()
+
+    def model_test_result(self) -> dict[str, Any]:
+        if self._model_test_phase != "result" or self._model_test_result is None:
+            raise RuntimeError("No model test result available")
+        return self._model_test_result
+
+    def _model_use_busy(self) -> bool:
+        return self._model_use_active
+
+    def _reset_model_use(self) -> None:
+        self._model_use_active = False
+        self._model_use_deadline_ns = None
+        self._model_use_latest = None
+        self._model_use_prediction_count = 0
+
+    def _model_use_status(self) -> dict[str, Any]:
+        return {
+            "active": self._model_use_active,
+            "window_s": MODEL_USE_WINDOW_S,
+            "interval_s": MODEL_USE_INTERVAL_S,
+            "prediction_count": self._model_use_prediction_count,
+            "checkpoint": self._model_test_checkpoint,
+            "latest": self._model_use_latest,
+        }
+
+    def _capture_model_use_window(self) -> dict[str, Any]:
+        with self._lock:
+            latest = self._latest_sample_index
+            filled = min(self._total_frames, self._buffer_samples)
+
+        if latest < 0 or filled <= 0:
+            return {"error": "no samples yet"}
+
+        window_samples = int(round(MODEL_USE_WINDOW_S * SAMPLE_RATE_HZ))
+        if filled < window_samples:
+            return {
+                "error": f"need {window_samples} samples, have {filled}",
+            }
+
+        end_idx = latest
+        start_idx = end_idx - window_samples + 1
+        window_tc = self._extract_training_aligned_window(start_idx, end_idx)
+        if window_tc is None:
+            return {
+                "error": "rolling window is no longer in the ring buffer",
+                "sample_index_start": start_idx,
+                "sample_index_end": end_idx,
+            }
+
+        return {
+            "sample_index_start": start_idx,
+            "sample_index_end": end_idx,
+            "window_tc": window_tc,
+            "window_len": int(window_tc.shape[0]),
+        }
+
+    def _predict_model_use_window(self, capture: dict[str, Any]) -> dict[str, Any]:
+        row: dict[str, Any] = {
+            "sample_index_start": capture.get("sample_index_start"),
+            "sample_index_end": capture.get("sample_index_end"),
+            "window_len": capture.get("window_len"),
+        }
+        if capture.get("error"):
+            row["error"] = capture["error"]
+            return row
+        window_tc = capture.get("window_tc")
+        if window_tc is None:
+            row["error"] = "missing window"
+            return row
+        if self._model_test_nn is None:
+            row["error"] = "model not loaded"
+            return row
+
+        idx_to_label = self._model_test_idx_to_label or {}
+        eeg_indices, emg_indices = self._fusion_channel_indices()
+        pred = predict_fusion_batch(
+            self._model_test_nn,
+            [np.asarray(window_tc, dtype=np.float32)],
+            device=self._model_test_device,
+            idx_to_label=idx_to_label,
+            eeg_indices=eeg_indices,
+            emg_indices=emg_indices,
+        )[0]
+        row.update(pred)
+        labeled_probs = {
+            idx_to_label[i]: round(float(pred["probs"][i]), 4)
+            for i in range(len(pred["probs"]))
+        }
+        print(
+            f"[model-use] samples {row.get('sample_index_start')}–{row.get('sample_index_end')}: "
+            f"probs={labeled_probs} "
+            f"pred={pred['predicted_label']} ({pred['predicted_probability']:.4f})",
+            flush=True,
+        )
+        return row
+
+    def _tick_model_use(self) -> None:
+        if not self._model_use_active:
+            return
+        deadline = self._model_use_deadline_ns
+        if deadline is None or time.perf_counter_ns() < deadline:
+            return
+
+        capture = self._capture_model_use_window()
+        self._model_use_latest = self._predict_model_use_window(capture)
+        self._model_use_prediction_count += 1
+        self._model_use_deadline_ns = time.perf_counter_ns() + int(MODEL_USE_INTERVAL_S * 1_000_000_000)
+
+    def start_model_use(self) -> None:
+        if self._z_active:
+            raise RuntimeError("Stop impedance measurement first")
+        if self._model_test_busy():
+            raise RuntimeError("Finish model test before using the model")
+        if self._alignment_test_busy():
+            raise RuntimeError("Finish alignment test before using the model")
+        if self._model_use_active:
+            raise RuntimeError("Model usage already active")
+        with self._lock:
+            latest = self._latest_sample_index
+        if latest < 0:
+            raise RuntimeError("No samples yet; wait for EEG stream")
+
+        self._load_model_for_test()
+        self._model_use_active = True
+        self._model_use_latest = None
+        self._model_use_prediction_count = 0
+        self._model_use_deadline_ns = time.perf_counter_ns()
+
+    def stop_model_use(self) -> None:
+        self._reset_model_use()
+
+    def _busy_for_impedance(self) -> str | None:
+        if self._recorder.enabled:
+            return "Stop the recording session before reading impedance"
+        if self._collect_phase not in ("disabled", "pick_word"):
+            return "Finish the current collection before reading impedance"
+        if self._alignment_test_busy() or self._model_test_busy() or self._model_use_active:
+            return "Finish the current test before reading impedance"
+        if self._trial_state != TrialState.IDLE:
+            return "End the active trial before reading impedance"
+        return None
+
+    def _apply_impedance(self, wave: ImpedanceWave) -> None:
+        rows = impedances_from_wave(wave)
+        with self._lock:
+            if not self._z_active:
+                return
+            for i, (r_ohm, c_f, updated) in enumerate(rows):
+                if not updated:
+                    continue
+                self._z_r[i] = r_ohm
+                self._z_c[i] = c_f
+            self._z_last_ns = time.perf_counter_ns()
+
+    def _tick_impedance_sim(self) -> None:
+        if not self._z_active:
+            return
+        now = time.perf_counter_ns()
+        if now - self._z_sim_ns < 400_000_000:
+            return
+        self._z_sim_ns = now
+        parity = self._z_sim_parity
+        self._z_sim_parity ^= 1
+        t = now * 1e-9
+        sense = _sense_adc(parity) or ()
+        skip = {_ui_index(adc) for adc in sense}
+        with self._lock:
+            for i in range(16):
+                if i in skip or not Z_ADC_ENABLED[_adc_of_ui(i)]:
+                    continue
+                base_r = 4_000.0 + i * 1_500.0
+                self._z_r[i] = base_r * (1.0 + 0.04 * math.sin(t * 1.7 + i))
+                self._z_c[i] = (12.0 + i) * 1e-9
+            if Z_REF_BIAS_ENABLED:
+                self._z_r[16] = 2_200.0 + 80.0 * math.sin(t)
+                self._z_c[16] = 18e-9
+                self._z_r[17] = 3_500.0 + 120.0 * math.sin(t * 1.3)
+                self._z_c[17] = 27e-9
+            self._z_last_ns = now
+
+    def _drain_impedance(self) -> None:
+        if self._test_mode:
+            self._tick_impedance_sim()
+            return
+        latest: dict[int, ImpedanceWave] = {}
+        while True:
+            try:
+                wave = self._z_queue.get_nowait()
+            except queue.Empty:
+                break
+            latest[int(wave.parity)] = wave
+        if not self._z_active:
+            return
+        for wave in latest.values():
+            self._apply_impedance(wave)
+
+    def _impedance_status(self) -> dict[str, Any]:
+        with self._lock:
+            active = self._z_active
+            r_vals = list(self._z_r)
+            c_vals = list(self._z_c)
+            last = self._z_last_ns
+        electrodes = []
+        for i, (name, r_ohm, c_f) in enumerate(zip(Z_ELECTRODES, r_vals, c_vals)):
+            if i >= 16 and not Z_REF_BIAS_ENABLED:
+                continue
+            if i < 16 and not Z_ADC_ENABLED[_adc_of_ui(i)]:
+                continue
+            electrodes.append(
+                {
+                    "name": name,
+                    "r_ohm": r_ohm if r_ohm is not None and math.isfinite(r_ohm) else None,
+                    "c_f": c_f if c_f is not None and math.isfinite(c_f) else None,
+                }
+            )
+        live = bool(active and last is not None and (time.perf_counter_ns() - last) < 2_000_000_000)
+        return {"active": active, "live": live, "electrodes": electrodes}
+
+    def start_impedance(self) -> None:
+        if self._z_active:
+            self._reader.send_host_cmd(HOST_CMD_Z_ON)
+            return
+        reason = self._busy_for_impedance()
+        if reason:
+            raise RuntimeError(reason)
+        self._reader.send_host_cmd(HOST_CMD_Z_ON)
+        with self._lock:
+            self._z_active = True
+            self._z_r = [None] * len(Z_ELECTRODES)
+            self._z_c = [None] * len(Z_ELECTRODES)
+            self._z_last_ns = None
+            self._z_sim_ns = 0
+            self._z_sim_parity = 0
+
+    def stop_impedance(self) -> None:
+        self._reader.send_host_cmd(HOST_CMD_Z_OFF)
+        with self._lock:
+            self._z_active = False
+
+    def _write_audio_ring(self, block: np.ndarray) -> None:
+        buf = self._audio
+        cap = buf.size
+        n = int(block.size)
+        if n <= 0:
+            return
+        if n >= cap:
+            buf[:] = block[-cap:]
+            self._audio_w = 0
+            return
+        w = self._audio_w
+        end = w + n
+        if end <= cap:
+            buf[w:end] = block
+        else:
+            first = cap - w
+            buf[w:] = block[:first]
+            buf[: end - cap] = block[first:]
+        self._audio_w = end % cap
+
+    def _apply_audio(self, seq: int, samples: np.ndarray) -> None:
+        if not AUDIO_ENABLED:
+            return
+        samples = np.asarray(samples, dtype=np.int16).reshape(-1)
+        if samples.size != AUDIO_SAMPLES:
+            return
+        seq = int(seq) & 0xFFFFFFFF
+        gap = 0
+        prev = self._audio_seq
+        if prev is not None:
+            delta = (seq - prev) & 0xFFFFFFFF
+            if delta == 0 or delta > 0x80000000:
+                return
+            missing = delta - 1
+            if 0 < missing <= 10:
+                gap = missing
+        block = samples
+        if gap:
+            block = np.concatenate(
+                (np.zeros(gap * AUDIO_SAMPLES, dtype=np.int16), samples)
+            )
+        with self._lock:
+            self._write_audio_ring(block)
+            self._audio_seq = seq
+        if self._recorder.enabled:
+            self._recorder.append_audio(block)
+
+    def _tick_test_audio(self) -> None:
+        if not AUDIO_ENABLED or not self._test_mode:
+            return
+        now = time.perf_counter()
+        if self._test_audio_t0 is None:
+            self._test_audio_t0 = now
+        due = int((now - self._test_audio_t0) * (AUDIO_RATE_HZ / AUDIO_SAMPLES))
+        if due - self._test_audio_n > 8:
+            self._test_audio_n = due - 1
+        while self._test_audio_n < due:
+            n0 = self._test_audio_n * AUDIO_SAMPLES
+            t = (n0 + np.arange(AUDIO_SAMPLES)) / AUDIO_RATE_HZ
+            y = np.sin(2 * np.pi * 220 * t) * 6000 + np.sin(2 * np.pi * 660 * t) * 2000
+            pcm = np.clip(y, -32767, 32767).astype(np.int16)
+            self._apply_audio(self._test_audio_n & 0xFFFFFFFF, pcm)
+            self._test_audio_n += 1
+
+    def _drain_audio(self) -> None:
+        self._tick_test_audio()
+        if self._test_mode:
+            return
+        while True:
+            try:
+                frame = self._audio_q.get_nowait()
+            except queue.Empty:
+                break
+            self._apply_audio(frame.seq, frame.samples)
+
+    def audio_waveform(self) -> dict[str, Any]:
+        with self._lock:
+            w = self._audio_w
+            buf = self._audio.copy()
+        if w:
+            view = np.concatenate((buf[w:], buf[:w]))
+        else:
+            view = buf
+        step = max(1, view.size // PLOT_POINTS)
+        y = view[::step]
+        if y.size > PLOT_POINTS:
+            y = y[-PLOT_POINTS:]
+        time_s = np.linspace(-WINDOW_SECONDS, 0, y.size, dtype=np.float32)
+        return {"time_s": time_s.tolist(), "y": y.astype(np.float32).tolist()}
+
+    def play_test_sentence(self) -> str:
+        if not AUDIO_ENABLED:
+            raise RuntimeError("audio disabled")
+        with self._speaker_lock:
+            if self._speaker_playing:
+                raise RuntimeError("A sentence is already playing")
+            sentence = random.choice(SPEAKER_TEST_SENTENCES)
+            self._speaker_playing = True
+            self._speaker_sentence = sentence
+        try:
+            pcm = synthesize_sentence(sentence)
+        except Exception:
+            with self._speaker_lock:
+                self._speaker_playing = False
+                self._speaker_sentence = None
+            raise
+        threading.Thread(target=self._speaker_run, args=(sentence, pcm), daemon=True).start()
+        return sentence
+
+    def _speaker_run(self, sentence: str, pcm: np.ndarray) -> None:
+        started = time.perf_counter()
+        try:
+            if self._recorder.enabled:
+                self._recorder.log_event(
+                    "speaker_test",
+                    sentence,
+                    payload={"sentence": sentence},
+                )
+            if self._test_mode:
+                if sd is not None:
+                    sd.play(pcm.astype(np.float32) / 32768.0, AUDIO_RATE_HZ)
+                    sd.wait()
+            else:
+                next_tick = time.perf_counter()
+                seq = 0
+                for i in range(0, int(pcm.size), AUDIO_SAMPLES):
+                    chunk = pcm[i : i + AUDIO_SAMPLES]
+                    if chunk.size < AUDIO_SAMPLES:
+                        chunk = np.pad(chunk, (0, AUDIO_SAMPLES - chunk.size))
+                    self._reader.send_audio_frame(seq, chunk)
+                    seq = (seq + 1) & 0xFFFFFFFF
+                    next_tick += AUDIO_SAMPLES / AUDIO_RATE_HZ
+                    delay = next_tick - time.perf_counter()
+                    if delay > 0:
+                        time.sleep(delay)
+                    else:
+                        next_tick = time.perf_counter()
+        except Exception as exc:  # pylint: disable=broad-except
+            print(f"speaker: {exc}", file=sys.stderr)
+        finally:
+            if self._test_mode:
+                remain = pcm.size / AUDIO_RATE_HZ - (time.perf_counter() - started)
+                if remain > 0:
+                    time.sleep(remain)
+            with self._speaker_lock:
+                self._speaker_playing = False
+
+    def status(self) -> dict[str, Any]:
+        with self._lock:
+            latest_sample = self._latest_sample_index
+            total_frames = self._total_frames
+        rail = self._rail_warning()
+        return {
+            "test_mode": self._test_mode,
+            "serial_error": self._reader.last_error,
+            "trial_state": self._trial_state.value,
+            "trial_word": self._current_trial_word or None,
+            "thinking_countdown": self._thinking_countdown_remaining(),
+            "recording_enabled": self._recorder.enabled,
+            "subject": (
+                {"id": self._subject[0], "name": self._subject[1]} if self._subject else None
+            ),
+            "session_dir": str(self._recorder.session_dir) if self._recorder.session_dir else None,
+            "last_session_dir": str(self._last_session_dir) if self._last_session_dir else None,
+            "pending_asr_jobs": self._pending_asr_jobs,
+            "latest_sample_index": latest_sample,
+            "total_frames": total_frames,
+            "rail_warning": rail,
+            "channel_count": CHANNEL_COUNT,
+            "eeg_channel_count": EEG_COUNT,
+            "channels_per_page": CHANNELS_PER_PAGE,
+            "boot_test": self._boot_status(),
+            "window_seconds": WINDOW_SECONDS,
+            "update_hz": UPDATE_HZ,
+            "default_fixed_scale_uv": DEFAULT_FIXED_SCALE_UV,
+            "collect": self._collect_status(),
+            "alignment_test": self._alignment_test_status(),
+            "model_test": self._model_test_status(),
+            "model_use": self._model_use_status(),
+            "impedance": self._impedance_status(),
+            "speaker_test": {
+                "playing": self._speaker_playing,
+                "sentence": self._speaker_sentence,
+            },
+            "link": DATA_LINK,
+            "audio_enabled": AUDIO_ENABLED,
+        }
+
+    def _boot_status(self) -> dict[str, Any] | None:
+        if self._boot is not None:
+            return {"passed": self._boot.passed, "summary": self._boot.summary}
+        reader = self._reader
+        if isinstance(reader, BleReader):
+            return {"passed": reader.boot_passed, "summary": reader.boot_summary}
+        return None
+
+    def waveform(
+        self,
+        *,
+        mode: str = "paged",
+        page_start: int = 0,
+        single_channel: int = 0,
+    ) -> dict[str, Any]:
+        with self._lock:
+            raw_view = _ordered_buffer_view(self._buffer_uv, self._write_idx)
+
+        raw_display = raw_view
+        if raw_display.shape[1] > self._display_samples:
+            raw_display = raw_view[:, -self._display_samples :]
+
+        # Filter the full look-back buffer, then keep only the trailing display window so
+        # edge transients stay in the discarded prefix (filtered waveform + band power only).
+        filtered_view = _preprocess_monitor_window(raw_view, SAMPLE_RATE_HZ)
+        if filtered_view.shape[1] > self._display_samples:
+            filtered_view = filtered_view[:, -self._display_samples :]
+
+        step = max(1, raw_display.shape[1] // PLOT_POINTS)
+        raw_ds = raw_display[:, ::step]
+        filtered_ds = filtered_view[:, ::step]
+        time_s = np.linspace(-WINDOW_SECONDS, 0, raw_ds.shape[1], dtype=np.float32)
+
+        if mode == "single":
+            indices = [single_channel % CHANNEL_COUNT]
+        elif mode == "all":
+            indices = list(range(CHANNEL_COUNT))
+        else:
+            indices = [page_start + i for i in range(CHANNELS_PER_PAGE) if page_start + i < CHANNEL_COUNT]
+
+        traces: list[dict[str, Any]] = []
+        debug_lines: list[str] = []
+        for channel_idx in indices:
+            channel_signal = filtered_view[channel_idx]
+            band_time_s, band_series = _band_power_series(
+                channel_signal,
+                SAMPLE_RATE_HZ,
+                bands_for_channel(channel_idx),
+            )
+            if self._debug_bands and channel_idx in (0, EEG_COUNT - 1, EEG_COUNT, CHANNEL_COUNT - 1):
+                debug_lines.append(_format_band_debug(channel_idx, channel_signal, band_series))
+            band_time_ds, band_series_ds = _downsample_band_series(band_time_s, band_series)
+            traces.append(
+                {
+                    "index": channel_idx,
+                    "name": channel_name(channel_idx),
+                    "y": raw_ds[channel_idx].astype(np.float32).tolist(),
+                    "y_filtered": filtered_ds[channel_idx].astype(np.float32).tolist(),
+                    "bands": band_series_ds,
+                    "band_time_s": band_time_ds,
+                }
+            )
+        if self._debug_bands and debug_lines:
+            now_ns = time.perf_counter_ns()
+            if now_ns - self._band_debug_last_print_ns >= 1_000_000_000:
+                self._band_debug_last_print_ns = now_ns
+                print("\n".join(debug_lines), flush=True)
+        return {
+            "time_s": time_s.astype(np.float32).tolist(),
+            "traces": traces,
+            "eeg_bands": list(EEG_BANDS),
+            "emg_bands": list(EMG_BANDS),
+        }
+
+    def dashboard(
+        self,
+        *,
+        mode: str = "paged",
+        page_start: int = 0,
+        single_channel: int = 0,
+    ) -> dict[str, Any]:
+        return {
+            "status": self.status(),
+            "waveform": self.waveform(
+                mode=mode,
+                page_start=page_start,
+                single_channel=single_channel,
+            ),
+            "audio": self.audio_waveform(),
+        }
+
+    def subjects_payload(self) -> dict[str, Any]:
+        selected = self._subject
+        return {
+            "subjects": self._subjects.list_subjects(),
+            "selected_id": selected[0] if selected else None,
+        }
+
+    def create_subject(self, name: str) -> dict[str, Any]:
+        if self._recorder.enabled:
+            raise RuntimeError("Stop session recording before changing subject")
+        created = self._subjects.create(name)
+        self._subject = (created["id"], created["name"])
+        return created
+
+    def select_subject(self, subject_id: str) -> dict[str, Any]:
+        if self._recorder.enabled:
+            raise RuntimeError("Stop session recording before changing subject")
+        subject_id = _safe_subject_id(subject_id)
+        name = self._subjects.name_for(subject_id)
+        self._subject = (subject_id, name)
+        counts = subject_session_counts(DEFAULT_RECORDINGS_DIR)
+        return {
+            "id": subject_id,
+            "name": name,
+            "session_count": int(counts.get(subject_id, 0)),
+        }
+
+    def start_recording(self, base_dir: Path) -> Path:
+        if self._z_active:
+            raise RuntimeError("Stop impedance measurement first")
+        if self._alignment_test_busy():
+            raise RuntimeError("Wait for alignment test to finish before recording")
+        if self._model_test_busy():
+            raise RuntimeError("Wait for model test to finish before recording")
+        if self._subject is None:
+            raise RuntimeError("Choose a subject before recording")
+        subject_id, _remembered_name = self._subject
+        subject_name = self._subjects.name_for(subject_id)
+        self._subject = (subject_id, subject_name)
+        _event_host_ns, aligned_float, aligned_idx, method = self._aligned_sample_now()
+        session_dir = self._recorder.start(
+            base_dir,
+            subject_id=subject_id,
+            subject_name=subject_name,
+        )
+        self._last_session_dir = session_dir
+        if aligned_idx is not None:
+            self._recorder.log_event(
+                event_type="session_recording_started",
+                sample_index_start=aligned_idx,
+                sample_index_start_float=aligned_float,
+                alignment_method=method,
+                payload={
+                    "source": "flask",
+                    "subject_id": subject_id,
+                    "subject_name": subject_name,
+                },
+            )
+        self._collect_phase = "pick_word"
+        return session_dir
+
+    def stop_recording(self) -> Optional[Path]:
+        if self._trial_state != TrialState.IDLE:
+            raise RuntimeError("End active trial before stopping session recording")
+        if self._collect_phase not in ("disabled", "pick_word"):
+            raise RuntimeError("Finish the current collection before stopping recording")
+        if self._pending_asr_jobs > 0:
+            raise RuntimeError("Wait for speech transcription to finish before stopping")
+        _event_host_ns, aligned_float, aligned_idx, method = self._aligned_sample_now()
+        if aligned_idx is not None:
+            self._recorder.log_event(
+                event_type="session_recording_stopped",
+                sample_index_start=aligned_idx,
+                sample_index_start_float=aligned_float,
+                alignment_method=method,
+                payload={"source": "flask"},
+            )
+        session_dir = self._recorder.session_dir
+        self._recorder.stop()
+        self._reset_collect()
+        if session_dir:
+            self._last_session_dir = session_dir
+        return session_dir
+
+    def log_marker(self, label: str, source: str = "api") -> int:
+        if not self._recorder.enabled:
+            raise RuntimeError("Recording disabled")
+        event_host_ns, aligned_float, aligned_idx, method = self._aligned_sample_now()
+        if aligned_idx is None:
+            raise RuntimeError("No samples yet")
+        self._recorder.log_event(
+            event_type="manual_marker",
+            label_text=label,
+            sample_index_start=aligned_idx,
+            sample_index_start_float=aligned_float,
+            alignment_method=method,
+            payload={"source": source, "event_host_perf_counter_ns": event_host_ns},
+        )
+        return aligned_idx
+
+    def start_thinking_trial(self, word: str) -> None:
+        if not self._recorder.enabled:
+            raise RuntimeError("Start session recording first")
+        if self._trial_state != TrialState.IDLE:
+            raise RuntimeError("Another trial is already active")
+        word = word.strip()
+        if not word:
+            raise RuntimeError("word is required")
+        _event_host_ns, aligned_float, aligned_idx, method = self._aligned_sample_now()
+        if aligned_idx is None:
+            raise RuntimeError("No samples yet")
+        trial_id = uuid.uuid4().hex
+        self._recorder.log_event(
+            event_type="thinking_trial_armed",
+            label_text=word,
+            sample_index_start=aligned_idx,
+            sample_index_start_float=aligned_float,
+            alignment_method=method,
+            payload={"trial_id": trial_id, "countdown_seconds": THINKING_COUNTDOWN_SECONDS},
+        )
+        self._trial_state = TrialState.THINKING_COUNTDOWN
+        self._current_trial_id = trial_id
+        self._current_trial_word = word
+        self._thinking_countdown_deadline_ns = (
+            time.perf_counter_ns() + (THINKING_COUNTDOWN_SECONDS * 1_000_000_000)
+        )
+
+    def end_thinking_trial(self) -> None:
+        if self._trial_state != TrialState.THINKING_ACTIVE or not self._current_trial_id:
+            raise RuntimeError("No active thinking trial")
+        _event_host_ns, aligned_float, aligned_idx, method = self._aligned_sample_now()
+        if aligned_idx is None:
+            raise RuntimeError("No samples yet")
+        self._recorder.log_event(
+            event_type="thinking_trial_end",
+            label_text=self._current_trial_word,
+            sample_index_start=aligned_idx,
+            sample_index_start_float=aligned_float,
+            alignment_method=method,
+            payload={"trial_id": self._current_trial_id},
+        )
+        self._trial_state = TrialState.IDLE
+        self._current_trial_id = None
+        self._current_trial_word = ""
+
+    def start_speech_block(self) -> str:
+        if not self._recorder.enabled:
+            raise RuntimeError("Start session recording first")
+        if self._trial_state != TrialState.IDLE:
+            raise RuntimeError("Another trial is already active")
+        if not self._speech_recorder.available:
+            raise RuntimeError("Install sounddevice to record speech audio")
+        session_dir = self._recorder.session_dir
+        if session_dir is None:
+            raise RuntimeError("Session folder unavailable")
+        _event_host_ns, aligned_float, aligned_idx, method = self._aligned_sample_now()
+        if aligned_idx is None:
+            raise RuntimeError("No samples yet")
+        block_id = uuid.uuid4().hex
+        wav_path = session_dir / f"speech_block_{block_id}.wav"
+        self._speech_recorder.start(wav_path)
+        self._trial_state = TrialState.SPEECH_ACTIVE
+        self._speech_block_id = block_id
+        self._speech_audio_path = wav_path
+        self._speech_block_start_sample_float = aligned_float
+        self._recorder.log_event(
+            event_type="speech_block_start",
+            sample_index_start=aligned_idx,
+            sample_index_start_float=aligned_float,
+            alignment_method=method,
+            payload={"speech_block_id": block_id, "audio_file": wav_path.name},
+        )
+        return block_id
+
+    def stop_speech_block(self) -> str:
+        if self._trial_state != TrialState.SPEECH_ACTIVE or not self._speech_block_id:
+            raise RuntimeError("No active speech block")
+        _event_host_ns, aligned_float, aligned_idx, method = self._aligned_sample_now()
+        if aligned_idx is None:
+            raise RuntimeError("No samples yet")
+        block_id = self._speech_block_id
+        wav_path = self._speech_audio_path
+        start_float = self._speech_block_start_sample_float
+        self._speech_recorder.stop()
+        self._recorder.log_event(
+            event_type="speech_block_end",
+            sample_index_start=aligned_idx,
+            sample_index_start_float=aligned_float,
+            alignment_method=method,
+            payload={"speech_block_id": block_id, "audio_file": wav_path.name if wav_path else ""},
+        )
+        if wav_path is not None and start_float is not None:
+            self._pending_asr_jobs += 1
+            worker = threading.Thread(
+                target=self._run_asr_in_background,
+                args=(wav_path, block_id, start_float),
+                daemon=True,
+            )
+            worker.start()
+        self._trial_state = TrialState.IDLE
+        self._speech_block_id = None
+        self._speech_audio_path = None
+        self._speech_block_start_sample_float = None
+        return block_id
+
+    def _run_asr_in_background(self, wav_path: Path, block_id: str, block_start_sample_float: float) -> None:
+        try:
+            if whisper is None:
+                self._asr_results_queue.put(
+                    {"type": "asr_error", "speech_block_id": block_id, "error": "whisper not installed"}
+                )
+                return
+            if self._whisper_model is None:
+                self._whisper_model = whisper.load_model("base")
+            result = self._whisper_model.transcribe(str(wav_path), word_timestamps=True, fp16=False)
+            words: list[dict[str, Any]] = []
+            for segment in result.get("segments", []):
+                for word in segment.get("words", []) or []:
+                    words.append(
+                        {
+                            "text": str(word.get("word", "")).strip(),
+                            "start_s": float(word.get("start", 0.0)),
+                            "end_s": float(word.get("end", 0.0)),
+                            "confidence": float(word.get("probability", 0.0)),
+                        }
+                    )
+            self._asr_results_queue.put(
+                {
+                    "type": "asr_words",
+                    "speech_block_id": block_id,
+                    "base_sample_float": block_start_sample_float,
+                    "word_count": len(words),
+                    "words": words,
+                }
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            self._asr_results_queue.put(
+                {"type": "asr_error", "speech_block_id": block_id, "error": str(exc)}
+            )
+
+    def _drain_asr_results(self) -> None:
+        while True:
+            try:
+                result = self._asr_results_queue.get_nowait()
+            except queue.Empty:
+                break
+            if self._pending_asr_jobs > 0:
+                self._pending_asr_jobs -= 1
+            if result.get("type") == "asr_error":
+                self._recorder.log_event(
+                    event_type="speech_asr_error",
+                    payload={
+                        "speech_block_id": result.get("speech_block_id", ""),
+                        "error": result.get("error", "unknown"),
+                    },
+                )
+                continue
+            if result.get("type") != "asr_words":
+                continue
+            base_sample_float = float(result.get("base_sample_float", 0.0))
+            block_id = str(result.get("speech_block_id", ""))
+            for word_info in result.get("words", []):
+                text = str(word_info.get("text", "")).strip()
+                if not text:
+                    continue
+                start_s = float(word_info.get("start_s", 0.0))
+                end_s = float(word_info.get("end_s", start_s))
+                confidence = float(word_info.get("confidence", 0.0))
+                sample_start_float = base_sample_float + (start_s * SAMPLE_RATE_HZ)
+                sample_end_float = base_sample_float + (end_s * SAMPLE_RATE_HZ)
+                sample_start = TimeAligner.quantize_sample_index(sample_start_float)
+                sample_end = TimeAligner.quantize_sample_index(sample_end_float)
+                self._recorder.log_event(
+                    event_type="speech_word",
+                    label_text=text,
+                    sample_index_start=sample_start,
+                    sample_index_start_float=sample_start_float,
+                    sample_index_end=sample_end,
+                    sample_index_end_float=sample_end_float,
+                    confidence=confidence,
+                    alignment_method="speech_offset_from_block_start",
+                    payload={
+                        "speech_block_id": block_id,
+                        "word_start_s": start_s,
+                        "word_end_s": end_s,
+                    },
+                )
+
+def create_app(service: AcquisitionService) -> Flask:
+    app = Flask(__name__, template_folder="templates", static_folder="static")
+
+    @app.get("/")
+    def index() -> str:
+        return render_template("index.html", audio_enabled=AUDIO_ENABLED)
+
+    @app.get("/api/dashboard")
+    def dashboard() -> Any:
+        mode = request.args.get("mode", "paged")
+        page_start = int(request.args.get("page_start", 0))
+        single_channel = int(request.args.get("single_channel", 0))
+        return jsonify(
+            service.dashboard(
+                mode=mode,
+                page_start=page_start,
+                single_channel=single_channel,
+            )
+        )
+
+    @app.get("/health")
+    def health() -> Any:
+        return jsonify({"ok": True})
+
+    @app.get("/status")
+    def status() -> Any:
+        return jsonify(service.status())
+
+    @app.post("/impedance/start")
+    def impedance_start() -> Any:
+        service.start_impedance()
+        return jsonify(service.status()["impedance"])
+
+    @app.post("/impedance/stop")
+    def impedance_stop() -> Any:
+        service.stop_impedance()
+        return jsonify(service.status()["impedance"])
+
+    @app.post("/audio/play-test")
+    def audio_play_test() -> Any:
+        sentence = service.play_test_sentence()
+        return jsonify({"sentence": sentence})
+
+    @app.get("/api/subjects")
+    def list_subjects() -> Any:
+        return jsonify(service.subjects_payload())
+
+    @app.post("/api/subjects")
+    def create_subject() -> Any:
+        payload = request.get_json(silent=True) or {}
+        subject = service.create_subject(str(payload.get("name", "")))
+        return jsonify({"subject": subject, "subjects": service.subjects_payload()["subjects"]})
+
+    @app.post("/api/subject")
+    def select_subject() -> Any:
+        payload = request.get_json(silent=True) or {}
+        subject = service.select_subject(str(payload.get("id", "")))
+        return jsonify({"subject": subject})
+
+    @app.post("/recording/start")
+    def start_recording() -> Any:
+        payload = request.get_json(silent=True) or {}
+        base_dir = Path(payload.get("base_dir", DEFAULT_RECORDINGS_DIR))
+        session_dir = service.start_recording(base_dir)
+        subject = service.status()["subject"]
+        return jsonify({"session_dir": str(session_dir), "subject": subject})
+
+    @app.post("/recording/stop")
+    def stop_recording() -> Any:
+        session_dir = service.stop_recording()
+        return jsonify({"session_dir": str(session_dir) if session_dir else None})
+
+    @app.post("/collect/word")
+    def collect_word() -> Any:
+        payload = request.get_json(silent=True) or {}
+        word = str(payload.get("word", "")).strip()
+        rep_count = int(payload.get("rep", COLLECTION_REPETITIONS))
+        service.start_collect_word(word, repetitions=rep_count)
+        return jsonify(service.status()["collect"])
+
+    @app.post("/collect/word-weights")
+    def collect_word_weights() -> Any:
+        payload = request.get_json(silent=True) or {}
+        raw_weights = payload.get("weights", payload)
+        if not isinstance(raw_weights, dict):
+            return jsonify({"error": "weights object is required"}), 400
+        service.set_collect_word_weights(raw_weights)
+        return jsonify(service.status()["collect"])
+
+    @app.post("/collect/negative-word-rate")
+    def collect_negative_word_rate() -> Any:
+        payload = request.get_json(silent=True) or {}
+        rate = payload.get("rate", payload.get("negative_word_rate", DEFAULT_NEGATIVE_WORD_RATE))
+        service.set_collect_negative_word_rate(float(rate))
+        return jsonify(service.status()["collect"])
+
+    @app.post("/collect/occasional-word-mix")
+    def collect_occasional_word_mix() -> Any:
+        payload = request.get_json(silent=True) or {}
+        raw_weights = payload.get("weights", payload)
+        if not isinstance(raw_weights, dict):
+            return jsonify({"error": "weights object is required"}), 400
+        service.set_collect_occasional_word_mix(raw_weights)
+        return jsonify(service.status()["collect"])
+
+    @app.post("/collect/scramble")
+    def collect_scramble() -> Any:
+        payload = request.get_json(silent=True) or {}
+        set_count = int(payload.get("set", DEFAULT_SCRAMBLE_SET))
+        rep_count = int(payload.get("rep", DEFAULT_SCRAMBLE_REP))
+        service.start_collect_scramble(set_count=set_count, rep_count=rep_count)
+        return jsonify(service.status()["collect"])
+
+    @app.post("/collect/scramble-breaks")
+    def collect_scramble_breaks() -> Any:
+        payload = request.get_json(silent=True) or {}
+        set_count = int(payload.get("set", DEFAULT_SCRAMBLE_SET))
+        rep_count = int(payload.get("rep", DEFAULT_SCRAMBLE_REP))
+        service.start_collect_scramble_breaks(set_count=set_count, rep_count=rep_count)
+        return jsonify(service.status()["collect"])
+
+    @app.post("/collect/scramble/stop-next-chance")
+    def collect_scramble_stop_next_chance() -> Any:
+        service.stop_collect_scramble_next_chance()
+        return jsonify(service.status()["collect"])
+
+    @app.post("/collect/occasional-word/toggle")
+    def collect_occasional_word_toggle() -> Any:
+        service.toggle_collect_occasional_word()
+        return jsonify(service.status()["collect"])
+
+    @app.post("/alignment-test/start")
+    def start_alignment_test() -> Any:
+        service.start_alignment_test()
+        return jsonify(service.status()["alignment_test"])
+
+    @app.post("/alignment-test/clear")
+    def clear_alignment_test() -> Any:
+        service.clear_alignment_test()
+        return jsonify(service.status()["alignment_test"])
+
+    @app.get("/alignment-test/result")
+    def alignment_test_result() -> Any:
+        return jsonify(service.alignment_test_result())
+
+    @app.post("/model-test/start")
+    def start_model_test() -> Any:
+        service.start_model_test()
+        return jsonify(service.status()["model_test"])
+
+    @app.post("/model-test/clear")
+    def clear_model_test() -> Any:
+        service.clear_model_test()
+        return jsonify(service.status()["model_test"])
+
+    @app.get("/model-test/result")
+    def model_test_result() -> Any:
+        return jsonify(service.model_test_result())
+
+    @app.post("/model-use/start")
+    def start_model_use() -> Any:
+        service.start_model_use()
+        return jsonify(service.status()["model_use"])
+
+    @app.post("/model-use/stop")
+    def stop_model_use() -> Any:
+        service.stop_model_use()
+        return jsonify(service.status()["model_use"])
+
+    @app.post("/events/marker")
+    def marker() -> Any:
+        payload = request.get_json(silent=True) or {}
+        label = str(payload.get("label", "")).strip()
+        if not label:
+            return jsonify({"error": "label is required"}), 400
+        source = str(payload.get("source", "api"))
+        sample_index = service.log_marker(label=label, source=source)
+        return jsonify({"sample_index": sample_index, "label": label})
+
+    @app.post("/trials/thinking/start")
+    def start_thinking() -> Any:
+        payload = request.get_json(silent=True) or {}
+        word = str(payload.get("word", "")).strip()
+        service.start_thinking_trial(word)
+        return jsonify({"state": "thinking_countdown"})
+
+    @app.post("/trials/thinking/end")
+    def end_thinking() -> Any:
+        service.end_thinking_trial()
+        return jsonify({"state": "idle"})
+
+    @app.post("/trials/speech/start")
+    def start_speech() -> Any:
+        block_id = service.start_speech_block()
+        return jsonify({"speech_block_id": block_id})
+
+    @app.post("/trials/speech/stop")
+    def stop_speech() -> Any:
+        block_id = service.stop_speech_block()
+        return jsonify({"speech_block_id": block_id, "state": "idle"})
+
+    @app.errorhandler(RuntimeError)
+    def handle_runtime_error(exc: RuntimeError) -> Any:
+        return jsonify({"error": str(exc)}), 400
+
+    return app
+
+
+def synthesize_sentence(text: str) -> np.ndarray:
+    import subprocess
+    import tempfile
+    import wave
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = str(Path(tmp) / "sentence.wav")
+        proc = subprocess.run(
+            ["say", "-o", path, "--file-format=WAVE", "--data-format=LEI16@16000", text],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            err = (proc.stderr or proc.stdout or "say failed").strip()
+            raise RuntimeError(err or "say failed")
+        with wave.open(path, "rb") as wf:
+            channels = wf.getnchannels()
+            width = wf.getsampwidth()
+            rate = wf.getframerate()
+            raw = wf.readframes(wf.getnframes())
+    if width != 2:
+        raise RuntimeError(f"unexpected sample width {width}")
+    pcm = np.frombuffer(raw, dtype="<i2").copy()
+    if channels > 1:
+        pcm = pcm.reshape(-1, channels)[:, 0].copy()
+    if rate != AUDIO_RATE_HZ and pcm.size:
+        n = max(1, int(round(pcm.size * AUDIO_RATE_HZ / rate)))
+        pcm = np.interp(
+            np.linspace(0, pcm.size, n, endpoint=False),
+            np.arange(pcm.size),
+            pcm.astype(np.float64),
+        ).astype(np.int16)
+    return pcm
+
+
+def pick_default_port() -> Optional[str]:
+    esp = find_esp_port()
+    if esp:
+        return esp
+    ports = list(list_ports.comports())
+    if not ports:
+        return None
+    usb_first = sorted(ports, key=lambda p: ("usb" not in p.description.lower(), p.device))
+    return usb_first[0].device
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Woodside Flask host service")
+    parser.add_argument("--test", action="store_true", help="Stream synthetic sine waves instead of USB serial")
+    parser.add_argument("--port", type=str, default=None, help="Serial port (e.g. /dev/tty.usbmodemXXXX)")
+    parser.add_argument("--baud", type=int, default=DEFAULT_BAUD, help="Serial baud rate")
+    parser.add_argument("--host", type=str, default="127.0.0.1", help="Flask bind host")
+    parser.add_argument(
+        "--http-port",
+        type=int,
+        default=DEFAULT_HTTP_PORT,
+        help="Flask bind port (avoid 5000 on macOS — often used by AirPlay)",
+    )
+    parser.add_argument(
+        "--debug-bands",
+        action="store_true",
+        help="Print EEG/EMG band power diagnostics to the console once per second",
+    )
+    return parser.parse_args()
+
+
+def _install_shutdown_handlers(service: AcquisitionService) -> None:
+    def _on_signal(signum: int, _frame: Any) -> None:
+        try:
+            sig_name = signal.Signals(signum).name
+        except ValueError:
+            sig_name = str(signum)
+        service.shutdown(recording_shutdown_reason=sig_name)
+        raise SystemExit(128 + signum if signum != signal.SIGINT else 130)
+
+    for sig in (signal.SIGINT, getattr(signal, "SIGTERM", None)):
+        if sig is not None:
+            signal.signal(sig, _on_signal)
+
+
+def main() -> int:
+    args = parse_args()
+    if args.test:
+        service = AcquisitionService(test_mode=True, debug_bands=args.debug_bands)
+    elif DATA_LINK == "ble":
+        service = AcquisitionService(debug_bands=args.debug_bands)
+    else:
+        serial_port = args.port or pick_default_port()
+        if not serial_port:
+            print("No serial ports found. Pass --port explicitly or use --test.")
+            return 1
+        try:
+            boot = run_boot_test(serial_port, args.baud)
+        except Exception as exc:  # pylint: disable=broad-except
+            print(f"boot test failed: {exc}", file=sys.stderr)
+            return 1
+        if not boot.passed:
+            print(f"boot test did not pass ({boot.summary}); streaming anyway", file=sys.stderr)
+        service = AcquisitionService(
+            baudrate=args.baud,
+            debug_bands=args.debug_bands,
+            boot=boot,
+        )
+    app = create_app(service)
+    _install_shutdown_handlers(service)
+    url = f"http://127.0.0.1:{args.http_port}/"
+    print(f"Woodside monitor GUI: {url}")
+    if args.test:
+        print("Test mode: streaming synthetic sine waves (no USB).")
+    if args.debug_bands:
+        print("Band debug: printing power values for EEG1, EEG8, EMG1, EMG8 once per second.")
+    print("(On macOS, port 5000 is often AirPlay and returns HTTP 403 — use the URL above.)")
+    try:
+        app.run(host=args.host, port=args.http_port, threaded=True, use_reloader=False)
+    finally:
+        service.shutdown()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

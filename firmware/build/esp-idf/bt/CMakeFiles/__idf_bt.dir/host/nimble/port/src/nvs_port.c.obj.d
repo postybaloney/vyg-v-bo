@@ -1,0 +1,36 @@
+esp-idf/bt/CMakeFiles/__idf_bt.dir/host/nimble/port/src/nvs_port.c.obj: \
+ /Users/ivanbokarev/esp/esp-idf/components/bt/host/nimble/port/src/nvs_port.c \
+ /Users/ivanbokarev/esp/esp-idf/components/esp_libc/platform_include/stdio.h \
+ /Users/ivanbokarev/code/vyg-v0/firmware/build/config/sdkconfig.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/lib/gcc/riscv32-esp-elf/15.2.0/include/stddef.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/sys/features.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/picolibc.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/stdio.h \
+ /Users/ivanbokarev/esp/esp-idf/components/esp_libc/platform_include/sys/cdefs.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/sys/cdefs.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/sys/config.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/machine/ieeefp.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/lib/gcc/riscv32-esp-elf/15.2.0/include/float.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/machine/_default_types.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/stdint.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/sys/_intsup.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/sys/_stdint.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/lib/gcc/riscv32-esp-elf/15.2.0/include/stdarg.h \
+ /Users/ivanbokarev/esp/esp-idf/components/esp_libc/platform_include/sys/lock.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/sys/lock.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/sys/_types.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/machine/_types.h \
+ /Users/ivanbokarev/esp/esp-idf/components/nvs_flash/include/nvs.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/lib/gcc/riscv32-esp-elf/15.2.0/include/stdbool.h \
+ /Users/ivanbokarev/esp/esp-idf/components/esp_common/include/esp_attr.h \
+ /Users/ivanbokarev/esp/esp-idf/components/esp_common/include/esp_assert.h \
+ /Users/ivanbokarev/esp/esp-idf/components/esp_libc/platform_include/assert.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/stdlib.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/machine/stdlib.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/alloca.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/sys/_locale.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/sys/_wait.h \
+ /Users/ivanbokarev/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/picolibc/include/assert.h \
+ /Users/ivanbokarev/esp/esp-idf/components/esp_common/include/esp_err.h \
+ /Users/ivanbokarev/esp/esp-idf/components/esp_common/include/esp_compiler.h \
+ /Users/ivanbokarev/esp/esp-idf/components/bt/host/nimble/nimble/porting/nimble/include/nimble/storage_port.h

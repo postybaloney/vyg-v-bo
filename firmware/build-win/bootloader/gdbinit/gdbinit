@@ -1,0 +1,2 @@
+source D:/vyg-emg1/firmware/build-win/bootloader/gdbinit/symbols
+source D:/vyg-emg1/firmware/build-win/bootloader/gdbinit/connect

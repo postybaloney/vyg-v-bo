@@ -1,0 +1,2 @@
+source /Users/ivanbokarev/code/vyg-v0/firmware/build/bootloader/gdbinit/symbols
+source /Users/ivanbokarev/code/vyg-v0/firmware/build/bootloader/gdbinit/connect

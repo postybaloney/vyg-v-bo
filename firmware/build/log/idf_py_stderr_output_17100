@@ -1,0 +1,30 @@
+Command: cmake -G Ninja -B D:\vyg-emg1\firmware\build -DPYTHON_DEPS_CHECKED=1 -DPYTHON=C:\Espressif\tools\python\v6.1\venv\Scripts\python.exe -DESP_PLATFORM=1 -DCCACHE_ENABLE=True D:\vyg-emg1\firmware
+CMake Error at C:/Espressif/tools/cmake/4.0.3/share/cmake-4.0/Modules/CMakeTestCCompiler.cmake:67 (message):
+  The C compiler
+
+    "C:/Espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/bin/riscv32-esp-elf-gcc.exe"
+
+  is not able to compile a simple test program.
+
+  It fails with the following output:
+
+    Change Dir: 'D:/vyg-emg1/firmware/build/CMakeFiles/CMakeScratch/TryCompile-pougoy'
+    
+    Run Build Command(s): C:/Espressif/tools/ninja/1.12.1/ninja.exe -v cmTC_9a973
+    [1/2] C:\Espressif\tools\riscv32-esp-elf\esp-15.2.0_20251204\riscv32-esp-elf\bin\riscv32-esp-elf-gcc.exe   @"D:/vyg-emg1/firmware/build/toolchain/cflags" -o CMakeFiles/cmTC_9a973.dir/testCCompiler.c.obj -c D:/vyg-emg1/firmware/build/CMakeFiles/CMakeScratch/TryCompile-pougoy/testCCompiler.c
+    FAILED: CMakeFiles/cmTC_9a973.dir/testCCompiler.c.obj 
+    C:\Espressif\tools\riscv32-esp-elf\esp-15.2.0_20251204\riscv32-esp-elf\bin\riscv32-esp-elf-gcc.exe   @"D:/vyg-emg1/firmware/build/toolchain/cflags" -o CMakeFiles/cmTC_9a973.dir/testCCompiler.c.obj -c D:/vyg-emg1/firmware/build/CMakeFiles/CMakeScratch/TryCompile-pougoy/testCCompiler.c
+    riscv32-esp-elf-gcc.exe: fatal error: cannot read spec file '/Users/ivanbokarev/code/vyg-v0/firmware/build/specs/picolibc.specs': No such file or directory
+    compilation terminated.
+    ninja: build stopped: subcommand failed.
+    
+    
+
+
+
+  CMake will not be able to correctly generate this project.
+Call Stack (most recent call first):
+  C:/esp/v6.1/esp-idf/tools/cmake/project.cmake:717 (__project)
+  CMakeLists.txt:17 (project)
+
+
